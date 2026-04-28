@@ -228,6 +228,23 @@ class GitHubAdapter extends PlatformAdapter {
     const { owner, repo } = this.context.repo;
     return `https://github.com/${owner}/${repo}/pull/${mrNumber}`;
   }
+
+  async getRecentComments(mrNumber, limit = 10) {
+    try {
+      const { owner, repo } = this.context.repo;
+      const { data: comments } = await this.octokit.rest.issues.listComments({
+        owner, repo, issue_number: mrNumber, per_page: limit, sort: 'created', direction: 'desc',
+      });
+      return comments.map(c => ({
+        body: c.body || '',
+        author: c.user?.login || '',
+        createdAt: c.created_at,
+        id: c.id,
+      }));
+    } catch (e) {
+      return [];
+    }
+  }
 }
 
 module.exports = GitHubAdapter;

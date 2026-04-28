@@ -88,6 +88,16 @@ inputs:
     required: false
     default: 'critical'
 
+  parallel:
+    description: 'Enable parallel review for large PRs (splits into batches)'
+    required: false
+    default: 'false'
+
+  max-concurrency:
+    description: 'Max parallel AI review requests (when parallel=true)'
+    required: false
+    default: '3'
+
 runs:
   using: 'node20'
   main: 'src/index.js'

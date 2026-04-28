@@ -216,6 +216,23 @@ class BitbucketAdapter extends PlatformAdapter {
     return `${this.baseUrl}/projects/${this.workspace}/repos/${this.repoSlug}/pull-requests/${mrNumber}`;
   }
 
+  async getRecentComments(mrNumber, limit = 10) {
+    try {
+      const comments = await this._api('GET',
+        `/repositories/${this.workspace}/${this.repoSlug}/pullrequests/${mrNumber}/comments`,
+        { pagelen: String(limit), sort: '-created_on' }
+      );
+      return (comments.values || []).map(c => ({
+        body: c.content?.raw || '',
+        author: c.user?.display_name || '',
+        createdAt: c.created_on,
+        id: c.id,
+      }));
+    } catch (e) {
+      return [];
+    }
+  }
+
   /**
    * Make a Bitbucket API request
    */

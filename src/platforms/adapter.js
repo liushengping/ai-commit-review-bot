@@ -103,6 +103,18 @@ class PlatformAdapter {
   getMergeRequestUrl(mrNumber) {
     throw new Error('getMergeRequestUrl() must be implemented by subclass');
   }
+
+  /**
+   * Get recent comments on the MR/PR.
+   * Used for command parsing (e.g., /re-review, /skip).
+   * @param {number} mrNumber
+   * @param {number} limit - Max comments to return
+   * @returns {Array<{body: string, author: string, createdAt: string}>}
+   */
+  async getRecentComments(mrNumber, limit = 10) {
+    // Default implementation — subclasses can override
+    return [];
+  }
 }
 
 module.exports = PlatformAdapter;

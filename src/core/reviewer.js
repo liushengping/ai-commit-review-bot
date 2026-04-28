@@ -29,7 +29,8 @@ const REVIEW_PROMPT_ZH = `你是一位资深代码审查专家。请对以下 Pu
       "severity": "info | warning | error | critical",
       "category": "bug | security | performance | quality | missing",
       "description": "问题描述",
-      "suggestion": "修复建议"
+      "suggestion": "修复建议",
+      "fix": "修复代码片段（unified diff 格式或代码块），如果能直接修复的话"
     }
   ],
   "highlights": ["值得肯定的设计或写法（如有）"]
@@ -69,7 +70,8 @@ Output ONLY valid JSON (no markdown, no explanation):
       "severity": "info | warning | error | critical",
       "category": "bug | security | performance | quality | missing",
       "description": "Issue description",
-      "suggestion": "Fix suggestion"
+      "suggestion": "Fix suggestion",
+      "fix": "Fix code snippet (unified diff or code block), if directly fixable"
     }
   ],
   "highlights": ["Good patterns worth noting (if any)"]
@@ -163,6 +165,7 @@ function parseReviewResponse(response) {
         category: issue.category || 'quality',
         description: issue.description || '',
         suggestion: issue.suggestion || '',
+        fix: issue.fix || '',
       })) : [],
       highlights: Array.isArray(review.highlights) ? review.highlights : [],
     };
@@ -199,6 +202,7 @@ function formatReviewComment(review, language, meta = {}) {
 
   if (meta.totalTokens) {
     parts.push(`> 📊 Estimated tokens: ~${meta.totalTokens.toLocaleString()}${meta.truncated ? ' (truncated)' : ''}`);
+    if (meta.batchCount > 1) parts.push(`> 🔄 Parallel review: ${meta.batchCount} batches`);
     parts.push('');
   }
 
@@ -219,9 +223,21 @@ function formatReviewComment(review, language, meta = {}) {
       const emoji = severityEmoji[issue.severity] || '⚠️';
       const category = categoryLabel[issue.category] || issue.category;
       const location = issue.line ? `${issue.file}:${issue.line}` : issue.file;
-      parts.push(`${emoji} **${category}** — \`${location}\``);
+      const sourceTag = issue.source ? ` \`${issue.source}\`` : '';
+      parts.push(`${emoji} **${category}**${sourceTag} — \`${location}\``);
       parts.push(`> ${issue.description}`);
       if (issue.suggestion) parts.push(`> 💡 **Suggestion:** ${issue.suggestion}`);
+      if (issue.fix) {
+        parts.push('');
+        parts.push('<details>');
+        parts.push('<summary>🔧 <b>Suggested Fix</b> (click to expand)</summary>');
+        parts.push('');
+        parts.push('```' + (issue.fix.includes('@@') ? 'diff' : ''));
+        parts.push(issue.fix);
+        parts.push('```');
+        parts.push('');
+        parts.push('</details>');
+      }
       parts.push('');
     }
   } else {
@@ -245,6 +261,8 @@ function formatReviewComment(review, language, meta = {}) {
     parts.push(`- Files skipped: ${meta.stats.filesSkipped || 0}`);
     parts.push(`- Total changes: +${meta.stats.additions || 0} -${meta.stats.deletions || 0}`);
     if (meta.stats.duration) parts.push(`- Review duration: ${meta.stats.duration}s`);
+    if (meta.stats.ruleIssues > 0) parts.push(`- 🔧 Rule engine issues: ${meta.stats.ruleIssues}`);
+    if (meta.stats.deduped > 0) parts.push(`- 🗂️ Deduplicated issues: ${meta.stats.deduped}`);
     parts.push('');
   }
 

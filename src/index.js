@@ -15,6 +15,11 @@ const { filterFiles } = require('./core/file-filter');
 const { loadConfig } = require('./core/config');
 const { sendNotifications } = require('./core/notifier');
 const { recordReview, formatStatsSummary } = require('./core/stats');
+const { runRules } = require('./core/rule-engine');
+const { filterCachedIssues } = require('./core/review-cache');
+const { parallelReview } = require('./core/parallel-review');
+const { formatFixSuggestion, augmentPromptWithFixRequest, normalizeIssues } = require('./core/auto-fixer');
+const { parseCommands, executeCommands, HELP_TEXT } = require('./core/commands');
 
 // Platform adapter layer
 const { createAdapter, detectPlatform } = require('./platforms');
@@ -22,7 +27,6 @@ const { createAdapter, detectPlatform } = require('./platforms');
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const BOT_MARKER = '🤖 Powered by [AI Commit Review Bot]';
-const BOT_FOOTER = `🤖 Powered by [AI Commit Review Bot](https://github.com/liushengping/ai-commit-review-bot)`;
 
 // ─── Logging helpers ─────────────────────────────────────────────────────────
 
@@ -31,7 +35,6 @@ let _warn = console.warn;
 let _error = console.error;
 
 function setupLogging(platform) {
-  // If running in GitHub Actions, use @actions/core logging
   if (process.env.GITHUB_ACTIONS) {
     try {
       const core = require('@actions/core');
@@ -41,7 +44,6 @@ function setupLogging(platform) {
       return core;
     } catch (e) {}
   }
-  // Otherwise, plain console
   _log = (msg) => console.log(`[INFO] ${msg}`);
   _warn = (msg) => console.warn(`[WARN] ${msg}`);
   _error = (msg) => console.error(`[ERROR] ${msg}`);
@@ -71,7 +73,7 @@ function validateInputs(inputs) {
 
   if (isNaN(inputs.maxDiffLines) || inputs.maxDiffLines < 1) {
     errors.push(`Invalid max-diff-lines: "${inputs.maxDiffLines}". Must be a positive integer.`);
-    inputs.maxDiffLines = 500; // reset to default
+    inputs.maxDiffLines = 500;
   }
 
   if (inputs.blockThreshold && !['none', 'info', 'warning', 'error', 'critical'].includes(inputs.blockThreshold)) {
@@ -84,7 +86,6 @@ function validateInputs(inputs) {
 // ─── Input loading ───────────────────────────────────────────────────────────
 
 function loadInputs() {
-  // Support both GitHub Actions inputs and environment variables
   if (process.env.GITHUB_ACTIONS) {
     try {
       const core = require('@actions/core');
@@ -102,13 +103,12 @@ function loadInputs() {
         inlineComments: core.getInput('inline-comments') !== 'false',
         blockThreshold: core.getInput('block-threshold') || 'critical',
         fallbackModel: core.getInput('fallback-model') || '',
+        parallel: core.getInput('parallel') === 'true',
+        maxConcurrency: parseInt(core.getInput('max-concurrency') || '3', 10),
       };
-    } catch (e) {
-      // actions/core not available, fall through to env
-    }
+    } catch (e) {}
   }
 
-  // Environment variable based configuration (works on any platform)
   return {
     platform: process.env.REVIEW_PLATFORM || detectPlatform(),
     token: process.env.REVIEW_TOKEN
@@ -128,7 +128,8 @@ function loadInputs() {
     inlineComments: process.env.REVIEW_INLINE_COMMENTS !== 'false',
     blockThreshold: process.env.REVIEW_BLOCK_THRESHOLD || 'critical',
     fallbackModel: process.env.AI_FALLBACK_MODEL || '',
-    // Platform-specific extras
+    parallel: process.env.REVIEW_PARALLEL === 'true',
+    maxConcurrency: parseInt(process.env.REVIEW_MAX_CONCURRENCY || '3', 10),
     prNumber: process.env.REVIEW_PR_NUMBER || process.env.CI_MERGE_REQUEST_IID || process.env.BITBUCKET_PR_NUMBER || '',
     projectId: process.env.CI_PROJECT_ID || '',
     workspace: process.env.BITBUCKET_WORKSPACE || '',
@@ -143,7 +144,6 @@ async function run() {
   const inputs = loadInputs();
   const actionsCore = setupLogging(inputs.platform);
 
-  // Validate inputs before proceeding
   const validationErrors = validateInputs(inputs);
   if (validationErrors.length > 0) {
     const msg = `Input validation failed:\n${validationErrors.map(e => `  - ${e}`).join('\n')}`;
@@ -178,6 +178,9 @@ async function run() {
     const workspace = process.env.CI_WORKSPACE || process.env.GITHUB_WORKSPACE || process.cwd();
     const config = loadConfig(workspace);
     _log(`⚙️ Config loaded: language=${config.review.language}, auto_approve=${config.review.auto_approve}`);
+
+    // 3a. Check for PR comment commands (if adapter supports it)
+    await handleCommands(adapter, mrInfo, config, workspace);
 
     // Merge config with inputs
     const effectiveLanguage = inputs.reviewLanguage !== 'zh' ? inputs.reviewLanguage : config.review.language;
@@ -222,10 +225,9 @@ async function run() {
     const files = parseDiff(rawDiff);
     _log(`📂 Found ${files.length} changed file(s)`);
 
-    // 7. Smart filtering (pass config for ignore patterns)
+    // 7. Smart filtering
     const { reviewable, skipped } = filterFiles(files, config);
     _log(`✅ ${reviewable.length} files to review, ${skipped.length} skipped`);
-
     for (const s of skipped) _log(`  ⏭️ Skipped: ${s.filename} (${s.reason})`);
 
     if (reviewable.length === 0) {
@@ -233,25 +235,71 @@ async function run() {
       return;
     }
 
-    // 8. Token-aware truncation
+    // 8. Run custom rules (zero-cost, deterministic)
+    let ruleIssues = [];
+    if (config.rules && config.rules.length > 0) {
+      ruleIssues = runRules(reviewable, config.rules);
+      if (ruleIssues.length > 0) {
+        _log(`📏 Custom rules found ${ruleIssues.length} issue(s)`);
+      }
+    }
+
+    // 9. Token-aware truncation
     const { files: truncatedFiles, truncated, totalTokens } = truncateDiff(reviewable, inputs.maxDiffLines);
     if (truncated) _log(`⚠️ Diff truncated to ~${totalTokens} tokens to stay within budget`);
     const diffText = formatDiffForReview(truncatedFiles);
 
-    // 9. Run AI review
+    // 10. Run AI review (parallel for large PRs)
     _log(`🤖 Running AI review with ${inputs.model}${effectiveFallback ? ` (fallback: ${effectiveFallback})` : ''} via ${inputs.provider}...`);
 
-    const review = await reviewDiff({
-      diffText, language: effectiveLanguage, provider: inputs.provider,
-      apiKey: inputs.apiKey, apiBaseUrl: inputs.apiBaseUrl,
-      model: inputs.model, fallbackModel: effectiveFallback,
-      customPrompt: config.custom_prompt, languageRules: config.language_rules,
-    });
+    let review;
+    let batchCount = 1;
+
+    if (inputs.parallel && reviewable.length > 3) {
+      // Parallel mode for large PRs
+      const result = await parallelReview({
+        files: truncatedFiles, language: effectiveLanguage, provider: inputs.provider,
+        apiKey: inputs.apiKey, apiBaseUrl: inputs.apiBaseUrl,
+        model: inputs.model, fallbackModel: effectiveFallback,
+        customPrompt: config.custom_prompt, languageRules: config.language_rules,
+        maxConcurrency: inputs.maxConcurrency,
+      });
+      review = result.review;
+      batchCount = result.batchCount;
+      _log(`🔄 Parallel review: ${batchCount} batch(es)`);
+    } else {
+      // Single-pass review
+      const augmentedPrompt = config.custom_prompt || '';
+      review = await reviewDiff({
+        diffText, language: effectiveLanguage, provider: inputs.provider,
+        apiKey: inputs.apiKey, apiBaseUrl: inputs.apiBaseUrl,
+        model: inputs.model, fallbackModel: effectiveFallback,
+        customPrompt: augmentedPrompt, languageRules: config.language_rules,
+      });
+    }
+
+    // Normalize issues (clean up fix fields)
+    review.issues = normalizeIssues(review.issues);
+
+    // Merge rule engine issues with AI issues
+    if (ruleIssues.length > 0) {
+      review.issues = [...ruleIssues, ...review.issues];
+    }
+
+    // 11. Filter cached (dedup) issues
+    const filePatchMap = new Map();
+    for (const f of truncatedFiles) filePatchMap.set(f.filename, f.patch);
+
+    const { newIssues, cachedCount } = filterCachedIssues(review.issues, filePatchMap, workspace);
+    if (cachedCount > 0) {
+      _log(`🗂️ Dedup: ${cachedCount} previously reported issue(s) skipped`);
+    }
+    review.issues = newIssues;
 
     const duration = Math.round((Date.now() - startTime) / 1000);
     _log(`✅ Review complete. Risk: ${review.risk_level}, Issues: ${review.issues.length} (${duration}s)`);
 
-    // 10. Map line numbers
+    // 12. Map line numbers
     const fileLineMaps = new Map();
     for (const file of truncatedFiles) {
       if (file.lineMapping) fileLineMaps.set(file.filename, file.lineMapping);
@@ -265,23 +313,25 @@ async function run() {
       }
     }
 
-    // 11. Post summary comment
+    // 13. Post summary comment
     const totalAdditions = truncatedFiles.reduce((s, f) => s + f.additions, 0);
     const totalDeletions = truncatedFiles.reduce((s, f) => s + f.deletions, 0);
 
     const comment = formatReviewComment(review, effectiveLanguage, {
       skippedFiles: skipped, model: inputs.model,
       incremental: incrementalMode, truncated, totalTokens,
+      batchCount,
       stats: {
         filesReviewed: reviewable.length, filesSkipped: skipped.length,
         additions: totalAdditions, deletions: totalDeletions, duration,
+        ruleIssues: ruleIssues.length, deduped: cachedCount,
       },
     });
 
     const commentAction = await adapter.postOrUpdateSummaryComment(mrInfo.number, comment, BOT_MARKER);
     _log(`📌 ${commentAction === 'updated' ? 'Updated' : 'Posted'} review comment.`);
 
-    // 12. Post inline comments
+    // 14. Post inline comments
     if (inputs.inlineComments && review.issues.length > 0) {
       const issuesForInline = review.issues.filter(i =>
         i.line > 0 && meetsSeverityThreshold(i.severity, effectiveInlineThreshold)
@@ -299,14 +349,14 @@ async function run() {
       }
     }
 
-    // 13. Set outputs (GitHub Actions)
+    // 15. Set outputs (GitHub Actions)
     if (actionsCore) {
       actionsCore.setOutput('risk-level', review.risk_level);
       actionsCore.setOutput('issues-count', review.issues.length.toString());
       actionsCore.setOutput('summary', review.summary);
     }
 
-    // 14. Block if threshold met
+    // 16. Block if threshold met
     const shouldBlock = review.issues.some(i => meetsSeverityThreshold(i.severity, effectiveBlockThreshold));
     if (shouldBlock) {
       const criticalCount = review.issues.filter(i => meetsSeverityThreshold(i.severity, effectiveBlockThreshold)).length;
@@ -315,7 +365,7 @@ async function run() {
       else { _error(msg); process.exitCode = 1; }
     }
 
-    // 15. Auto-approve
+    // 17. Auto-approve
     if (effectiveAutoApprove && review.issues.length === 0) {
       try {
         await adapter.approve(mrInfo.number,
@@ -326,7 +376,7 @@ async function run() {
       }
     }
 
-    // 16. Auto-label
+    // 18. Auto-label
     if (config.labels?.enabled) {
       try {
         const prefix = config.labels.prefix || 'ai-review';
@@ -340,7 +390,7 @@ async function run() {
       }
     }
 
-    // 17. Record statistics
+    // 19. Record statistics
     if (config.stats?.enabled !== false) {
       recordReview(workspace, review, {
         prNumber: mrInfo.number, prTitle: mrInfo.title,
@@ -358,12 +408,15 @@ async function run() {
       }
     }
 
-    // 18. Webhook notifications
+    // 20. Webhook notifications
     if (config.webhooks && config.webhooks.length > 0) {
       const prUrl = adapter.getMergeRequestUrl(mrInfo.number);
       await sendNotifications({ review, prUrl, prTitle: mrInfo.title, webhooks: config.webhooks });
       _log('📢 Webhook notifications sent.');
     }
+
+    // Store review context for command handling
+    _lastReviewIssues = review.issues;
 
   } catch (error) {
     const msg = `Action failed: ${error.message}`;
@@ -378,9 +431,64 @@ async function run() {
   }
 }
 
-/**
- * Format an issue as an inline comment
- */
+// ─── Command handling ────────────────────────────────────────────────────────
+
+let _lastReviewIssues = [];
+
+async function handleCommands(adapter, mrInfo, config, repoRoot) {
+  try {
+    // Get recent comments (last 10)
+    const comments = await adapter.getRecentComments?.(mrInfo.number, 10);
+    if (!comments || comments.length === 0) return;
+
+    for (const comment of comments) {
+      const commands = parseCommands(comment.body);
+      if (commands.length === 0) continue;
+
+      _log(`📩 Found ${commands.length} command(s) in comment by ${comment.author || 'unknown'}`);
+
+      const context = {
+        repoRoot,
+        config,
+        lastReviewIssues: _lastReviewIssues,
+        adapter,
+        mrNumber: mrInfo.number,
+      };
+
+      const responses = executeCommands(commands, context);
+
+      // Post responses as reply comments
+      if (responses.length > 0) {
+        const responseBody = responses.join('\n\n---\n\n');
+        try {
+          await adapter.postOrUpdateSummaryComment(
+            mrInfo.number,
+            `## 🤖 Command Response\n\n${responseBody}`,
+            '🤖 Command Response'
+          );
+        } catch (e) {
+          _warn(`Could not post command response: ${e.message}`);
+        }
+      }
+
+      // Handle special flags
+      if (context.requestApprove) {
+        try {
+          await adapter.approve(mrInfo.number, '✅ Manually approved via /approve command.');
+          _log('✅ Manual approval sent.');
+        } catch (e) {
+          _warn(`Could not approve: ${e.message}`);
+        }
+      }
+    }
+  } catch (e) {
+    // Command handling is best-effort; don't fail the review
+    _log(`Command handling skipped: ${e.message}`);
+  }
+}
+
+// ─── Format inline comments ──────────────────────────────────────────────────
+
 function formatInlineComment(issue) {
   const severityEmoji = { info: 'ℹ️', warning: '⚠️', error: '❌', critical: '🚨' };
   const categoryLabel = {
@@ -390,9 +498,16 @@ function formatInlineComment(issue) {
 
   const emoji = severityEmoji[issue.severity] || '⚠️';
   const category = categoryLabel[issue.category] || issue.category;
+  const source = issue.source ? ` [${issue.source}]` : '';
 
-  let comment = `${emoji} **${category}**\n\n${issue.description}`;
+  let comment = `${emoji} **${category}**${source}\n\n${issue.description}`;
+
   if (issue.suggestion) comment += `\n\n💡 **Suggestion:** ${issue.suggestion}`;
+
+  // Add fix suggestion if available
+  const fixBlock = formatFixSuggestion(issue);
+  if (fixBlock) comment += `\n\n${fixBlock}`;
+
   return comment;
 }
 
@@ -404,7 +519,6 @@ function gracefulShutdown(signal) {
   if (_shuttingDown) return;
   _shuttingDown = true;
   console.log(`\n[INFO] Received ${signal}, shutting down gracefully...`);
-  // Give pending I/O a moment to complete
   setTimeout(() => process.exit(0), 2000);
 }
 
@@ -415,4 +529,4 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 run();
 
-module.exports = { run, loadInputs, detectPlatform, BOT_MARKER, BOT_FOOTER };
+module.exports = { run, loadInputs, detectPlatform, BOT_MARKER };

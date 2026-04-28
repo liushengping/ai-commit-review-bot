@@ -14,7 +14,7 @@ severity:
   block_threshold: error    # error and above will block merging
   inline_threshold: warning # warning and above will get inline comments
 
-# Language/framework specific rules
+# Language/framework specific rules (applied to AI prompt)
 language_rules:
   - pattern: "*.py"
     prompt: "重点关注类型提示、f-string 安全、GIL 并发问题"
@@ -25,7 +25,42 @@ language_rules:
   - pattern: "*.sql"
     prompt: "重点关注 SQL 注入、索引使用、性能"
 
+# ──────────────────────────────────────────────────────────────
+# Custom Rules (zero-cost, deterministic — runs BEFORE AI review)
+# ──────────────────────────────────────────────────────────────
+rules:
+  - name: no-console-log
+    pattern: "*.js"
+    match: "console\\.log\\("
+    severity: warning
+    message: "Remove console.log before merging"
+    suggestion: "Use a proper logger or remove debug output"
+
+  - name: no-hardcoded-secrets
+    pattern: "*"
+    match: "(api[_-]?key|secret|password|token)\\s*[:=]\\s*['\"][^'\"]{8,}"
+    severity: critical
+    category: security
+    message: "Possible hardcoded secret detected"
+    suggestion: "Use environment variables or a secrets manager"
+
+  - name: require-error-handling
+    pattern: "*.js"
+    match: "await\\s+\\w+"
+    require_nearby: "try|catch|\\.catch"
+    severity: error
+    message: "Async calls must have error handling"
+
+  - name: max-function-length
+    pattern: "*.js"
+    metric: function_lines
+    threshold: 50
+    severity: warning
+    message: "Function exceeds 50 lines, consider splitting"
+
+# ──────────────────────────────────────────────────────────────
 # Webhook notifications
+# ──────────────────────────────────────────────────────────────
 webhooks:
   - type: dingtalk
     url: https://oapi.dingtalk.com/robot/send?access_token=xxx

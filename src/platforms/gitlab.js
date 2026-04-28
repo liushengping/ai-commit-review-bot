@@ -234,6 +234,25 @@ class GitLabAdapter extends PlatformAdapter {
     return `${this.baseUrl}/${this.projectId}/-/merge_requests/${mrNumber}`;
   }
 
+  async getRecentComments(mrNumber, limit = 10) {
+    try {
+      const notes = await this._api('GET',
+        `/projects/${this.projectId}/merge_requests/${mrNumber}/notes`,
+        { sort: 'desc', per_page: String(limit) }
+      );
+      return (notes || [])
+        .filter(n => !n.system)
+        .map(n => ({
+          body: n.body || '',
+          author: n.author?.username || '',
+          createdAt: n.created_at,
+          id: n.id,
+        }));
+    } catch (e) {
+      return [];
+    }
+  }
+
   /**
    * Make a GitLab API request
    */

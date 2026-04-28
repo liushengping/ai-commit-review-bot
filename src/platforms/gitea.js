@@ -240,6 +240,23 @@ class GiteaAdapter extends PlatformAdapter {
     return `${this.baseUrl}/${this.owner}/${this.repo}/pulls/${mrNumber}`;
   }
 
+  async getRecentComments(mrNumber, limit = 10) {
+    try {
+      const comments = await this._api('GET',
+        `/repos/${this.owner}/${this.repo}/issues/${mrNumber}/comments`,
+        { sort: 'created', direction: 'desc', limit: String(limit) }
+      );
+      return (comments || []).map(c => ({
+        body: c.body || '',
+        author: c.user?.login || '',
+        createdAt: c.created_at,
+        id: c.id,
+      }));
+    } catch (e) {
+      return [];
+    }
+  }
+
   /**
    * Make a Gitea API request
    */
