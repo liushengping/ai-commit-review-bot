@@ -89,15 +89,37 @@ function getReviewPrompt(language) {
   return language === 'en' ? REVIEW_PROMPT_EN : REVIEW_PROMPT_ZH;
 }
 
-function buildLanguageRulesPrompt(languageRules) {
+function buildLanguageRulesPrompt(languageRules, diffText) {
   if (!languageRules || !Array.isArray(languageRules) || languageRules.length === 0) return '';
+
+  // Extract filenames from diff text
+  const fileMatches = diffText.match(/--- File: (.+?) /g) || [];
+  const filenames = fileMatches.map(m => m.replace('--- File: ', '').replace(' ', ''));
+
   let section = '\n\n## Language/Framework Specific Rules\n\n';
+  let hasRules = false;
+
   for (const rule of languageRules) {
     if (rule.pattern && rule.prompt) {
-      section += `### Files matching \`${rule.pattern}\`\n${rule.prompt}\n\n`;
+      // Convert glob pattern to regex for matching
+      const regexStr = rule.pattern
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*\*/g, '{{GLOBSTAR}}')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\?/g, '[^/]')
+        .replace(/{{GLOBSTAR}}/g, '.*');
+      const regex = new RegExp(regexStr);
+
+      // Only include rules that match at least one file in the diff
+      const matchingFiles = filenames.filter(f => regex.test(f));
+      if (matchingFiles.length > 0) {
+        section += `### Files matching \`${rule.pattern}\` (${matchingFiles.join(', ')})\n${rule.prompt}\n\n`;
+        hasRules = true;
+      }
     }
   }
-  return section;
+
+  return hasRules ? section : '';
 }
 
 async function reviewDiff({ diffText, language, provider, apiKey, apiBaseUrl, model, fallbackModel, customPrompt, languageRules }) {
@@ -107,7 +129,7 @@ async function reviewDiff({ diffText, language, provider, apiKey, apiBaseUrl, mo
 
   let userPrompt = getReviewPrompt(language) + diffText;
 
-  const langRulesPrompt = buildLanguageRulesPrompt(languageRules);
+  const langRulesPrompt = buildLanguageRulesPrompt(languageRules, diffText);
   if (langRulesPrompt) userPrompt += langRulesPrompt;
   if (customPrompt) userPrompt += '\n\n## Additional Review Instructions\n\n' + customPrompt;
 

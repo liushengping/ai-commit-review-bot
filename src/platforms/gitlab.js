@@ -211,12 +211,15 @@ class GitLabAdapter extends PlatformAdapter {
         { per_page: '100' }
       );
 
+      // commits are sorted newest-first; we want the last commit that is
+      // older than or equal to the bot review time — so iterate all and keep
+      // updating lastSha (don't break early).
       let lastSha = null;
       for (const commit of commits) {
         const commitDate = new Date(commit.committed_date || commit.created_at);
         if (commitDate <= lastBotReviewTime) {
           lastSha = commit.id;
-          break; // commits are sorted newest-first, so first match is the latest
+          // Don't break — newer commits come first, we want the last match
         }
       }
 

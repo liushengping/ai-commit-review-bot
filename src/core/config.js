@@ -6,6 +6,13 @@
 const fs = require('fs');
 const path = require('path');
 
+let yaml;
+try {
+  yaml = require('js-yaml');
+} catch (e) {
+  yaml = null;
+}
+
 const DEFAULT_CONFIG = {
   review: {
     language: 'zh',
@@ -34,19 +41,33 @@ function loadConfig(repoRoot) {
   try {
     if (fs.existsSync(configPath)) {
       const content = fs.readFileSync(configPath, 'utf8');
-      const userConfig = parseSimpleYaml(content);
+      let userConfig;
+
+      if (yaml) {
+        userConfig = yaml.load(content) || {};
+      } else {
+        // Fallback: basic JSON-compatible YAML parsing
+        userConfig = parseSimpleYamlFallback(content);
+      }
+
       return deepMerge(DEFAULT_CONFIG, userConfig);
     }
   } catch (e) {
-    // Ignore config loading errors, use defaults
+    // Config loading failed — use defaults, but log warning
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(`Warning: Failed to load .review.yml: ${e.message}. Using defaults.`);
+    }
   }
   return deepMerge(DEFAULT_CONFIG, {});
 }
 
 /**
- * Simple YAML parser for basic config files
+ * Minimal fallback YAML parser (only used when js-yaml is not available).
+ * Handles basic key: value, nested objects, and simple arrays.
+ * Does NOT handle: quoted strings with colons, multi-line strings,
+ * complex nested structures, or anchors/aliases.
  */
-function parseSimpleYaml(content) {
+function parseSimpleYamlFallback(content) {
   const result = {};
   const lines = content.split('\n');
   let sectionStack = [{ obj: result, indent: -1 }];
@@ -77,7 +98,6 @@ function parseSimpleYaml(content) {
         if (currentArrayKey && Array.isArray(currentObj[currentArrayKey])) {
           const newObj = {};
           newObj[key] = val;
-          // Check if next lines are part of this array item
           let j = i + 1;
           while (j < lines.length) {
             const nextLine = lines[j];
@@ -109,9 +129,7 @@ function parseSimpleYaml(content) {
         const val = line.substring(colonIdx + 1).trim();
 
         if (val === '' || val === '|' || val === '>') {
-          // Nested object or multi-line string
           if (val === '|' || val === '>') {
-            // Multi-line string
             let multiLine = '';
             let j = i + 1;
             while (j < lines.length) {
@@ -128,12 +146,21 @@ function parseSimpleYaml(content) {
             i = j - 1;
             currentObj[key] = multiLine.trim();
           } else {
-            currentObj[key] = {};
-            sectionStack.push({ obj: currentObj[key], indent });
+            // Check if next non-empty line starts with "- " (array)
+            let nextNonEmpty = i + 1;
+            while (nextNonEmpty < lines.length && lines[nextNonEmpty].trim() === '') nextNonEmpty++;
+            const nextContent = nextNonEmpty < lines.length ? lines[nextNonEmpty].trim() : '';
+            if (nextContent.startsWith('- ')) {
+              currentObj[key] = [];
+              currentArrayKey = key;
+            } else {
+              currentObj[key] = {};
+              sectionStack.push({ obj: currentObj[key], indent });
+            }
           }
         } else {
           currentObj[key] = parseValue(val);
-          currentArrayKey = key; // Might be followed by array items
+          currentArrayKey = key;
         }
       }
     }
@@ -167,4 +194,4 @@ function deepMerge(target, source) {
   return result;
 }
 
-module.exports = { loadConfig, parseSimpleYaml, deepMerge, DEFAULT_CONFIG };
+module.exports = { loadConfig, parseSimpleYamlFallback, deepMerge, DEFAULT_CONFIG };

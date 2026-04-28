@@ -6,6 +6,7 @@
  * - Line number mapping (diff line → new file actual line)
  * - Global token estimation and truncation
  * - Per-file diff context
+ * - Binary file detection
  */
 
 /**
@@ -29,12 +30,28 @@ function parseDiff(rawDiff) {
 
     const filename = match[2];
 
+    // Check for binary file diff
+    const isBinary = chunk.includes('Binary files') && chunk.includes('differ');
+
     // Determine file status
     let status = 'modified';
     const chunkHeader = lines.slice(0, 5).join(' ');
     if (chunkHeader.includes('new file')) status = 'added';
     else if (chunkHeader.includes('deleted file')) status = 'deleted';
     else if (chunkHeader.includes('rename')) status = 'renamed';
+
+    if (isBinary) {
+      files.push({
+        filename,
+        status,
+        additions: 0,
+        deletions: 0,
+        patch: '(binary file)',
+        lineMapping: [],
+        isBinary: true,
+      });
+      continue;
+    }
 
     // Count additions and deletions, build line mapping
     let additions = 0;
@@ -77,6 +94,7 @@ function parseDiff(rawDiff) {
       deletions,
       patch: patchLines.join('\n'),
       lineMapping,
+      isBinary: false,
     });
   }
 
@@ -98,9 +116,29 @@ function mapDiffLineToNewFile(lineMapping, diffLineNum) {
  * Estimate token count (rough: 1 token ≈ 4 chars for English, ~2 chars for CJK)
  */
 function estimateTokens(text) {
-  const cjkCount = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g) || []).length;
+  // CJK Unified Ideographs, Extension A, Japanese Kana, Korean Hangul, CJK punctuation
+  const cjkCount = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\u3000-\u303f\uff00-\uffef]/g) || []).length;
   const nonCjkLength = text.length - cjkCount;
   return Math.ceil(nonCjkLength / 4 + cjkCount / 2);
+}
+
+/**
+ * Truncate a single file's patch and rebuild its lineMapping accordingly.
+ */
+function truncateFilePatch(file, maxLines) {
+  const lines = file.patch.split('\n');
+  if (lines.length <= maxLines) return file;
+
+  const truncatedPatch = lines.slice(0, maxLines).join('\n') + '\n... (truncated)';
+  const truncatedMapping = file.lineMapping
+    ? file.lineMapping.filter(m => m.diffLineIndex < maxLines)
+    : undefined;
+
+  return {
+    ...file,
+    patch: truncatedPatch,
+    lineMapping: truncatedMapping,
+  };
 }
 
 /**
@@ -109,16 +147,7 @@ function estimateTokens(text) {
 function truncateDiff(files, maxLines = 500, maxTotalTokens = 100000) {
   let processedFiles = [];
   for (const file of files) {
-    const lines = file.patch.split('\n');
-    if (lines.length > maxLines) {
-      processedFiles.push({
-        ...file,
-        patch: lines.slice(0, maxLines).join('\n') + '\n... (truncated)',
-        lineMapping: file.lineMapping ? file.lineMapping.slice(0, maxLines) : undefined,
-      });
-    } else {
-      processedFiles.push(file);
-    }
+    processedFiles.push(truncateFilePatch(file, maxLines));
   }
 
   const sorted = [...processedFiles].sort((a, b) => (b.additions + b.deletions) - (a.additions + a.deletions));
@@ -134,7 +163,12 @@ function truncateDiff(files, maxLines = 500, maxTotalTokens = 100000) {
       if (remaining > 2000) {
         const charBudget = remaining * 4;
         const truncatedPatch = file.patch.substring(0, charBudget) + '\n... (truncated - token limit)';
-        result.push({ ...file, patch: truncatedPatch });
+        // Rebuild lineMapping for truncated patch
+        const truncatedLines = truncatedPatch.split('\n').length;
+        const truncatedMapping = file.lineMapping
+          ? file.lineMapping.filter(m => m.diffLineIndex < truncatedLines)
+          : undefined;
+        result.push({ ...file, patch: truncatedPatch, lineMapping: truncatedMapping });
         totalTokens += estimateTokens(truncatedPatch);
       }
       globalTruncated = true;
@@ -160,6 +194,12 @@ function formatDiffForReview(files) {
   parts.push(`Total files changed: ${files.length}\n`);
 
   for (const file of files) {
+    if (file.isBinary) {
+      parts.push(`--- File: ${file.filename} (${file.status}) [binary file] ---`);
+      parts.push('(binary file - skipped)');
+      parts.push('');
+      continue;
+    }
     parts.push(`--- File: ${file.filename} (${file.status}) [+${file.additions} -${file.deletions}] ---`);
     parts.push(file.patch);
     parts.push('');

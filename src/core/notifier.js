@@ -92,6 +92,9 @@ function httpPost(urlStr, body, secret) {
       headers['X-Hub-Signature-256'] = `sha256=${signature}`;
     }
 
+    // Sanitize URL for error messages (remove token/secret from query string)
+    const safeUrl = `${url.protocol}//${url.host}${url.pathname}`;
+
     const req = transport.request({
       hostname: url.hostname, port: url.port || (isHttps ? 443 : 80),
       path: url.pathname + url.search, method: 'POST', headers,
@@ -100,12 +103,12 @@ function httpPost(urlStr, body, secret) {
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         if (res.statusCode >= 200 && res.statusCode < 300) resolve(data);
-        else reject(new Error(`Webhook returned ${res.statusCode}: ${data.substring(0, 200)}`));
+        else reject(new Error(`Webhook returned ${res.statusCode} (${safeUrl}): ${data.substring(0, 200)}`));
       });
     });
 
-    req.on('error', reject);
-    req.setTimeout(10000, () => { req.destroy(); reject(new Error('Webhook request timeout (10s)')); });
+    req.on('error', (err) => reject(new Error(`Webhook error (${safeUrl}): ${err.message}`)));
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error(`Webhook timeout (${safeUrl})`)); });
     req.write(body);
     req.end();
   });

@@ -65,10 +65,15 @@ class BitbucketAdapter extends PlatformAdapter {
 
   async getDiff(mrNumber, options = {}) {
     if (options.sinceSha) {
-      // Bitbucket doesn't have a direct compare for PRs.
-      // Use the PR diff endpoint (it always shows full diff).
-      // For incremental, we'd need to compute it ourselves.
-      console.warn('Bitbucket: incremental review not natively supported, showing full diff.');
+      // Bitbucket doesn't have a direct compare API for PRs like GitHub.
+      // Use the changes endpoint with a diffstat to get changed files,
+      // then fetch the full PR diff. For true incremental, we'd need to
+      // compute the diff ourselves using the compare API.
+      // Bitbucket Cloud does have a compare endpoint for branches:
+      //   GET /2.0/repositories/{workspace}/{repo_slug}/diff/{spec}
+      // But it requires branch names, not SHAs. So we fall back to full diff
+      // and note it in the review comment.
+      console.warn('Bitbucket: incremental review uses full PR diff (platform limitation).');
     }
 
     // Get PR diff — Bitbucket returns the diff as plain text

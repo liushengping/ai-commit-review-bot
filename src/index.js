@@ -19,6 +19,11 @@ const { recordReview, formatStatsSummary } = require('./core/stats');
 // Platform adapter layer
 const { createAdapter, detectPlatform } = require('./platforms');
 
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const BOT_MARKER = '🤖 Powered by [AI Commit Review Bot]';
+const BOT_FOOTER = `🤖 Powered by [AI Commit Review Bot](https://github.com/liushengping/ai-commit-review-bot)`;
+
 // ─── Logging helpers ─────────────────────────────────────────────────────────
 
 let _log = console.log;
@@ -41,6 +46,39 @@ function setupLogging(platform) {
   _warn = (msg) => console.warn(`[WARN] ${msg}`);
   _error = (msg) => console.error(`[ERROR] ${msg}`);
   return null;
+}
+
+// ─── Input validation ────────────────────────────────────────────────────────
+
+function validateInputs(inputs) {
+  const errors = [];
+
+  if (!inputs.apiKey) {
+    errors.push('API key is required. Set AI_API_KEY or api-key input.');
+  }
+
+  if (!inputs.token) {
+    errors.push('Platform token is required. Set REVIEW_TOKEN or platform-specific token.');
+  }
+
+  if (inputs.apiBaseUrl) {
+    try {
+      new URL(inputs.apiBaseUrl);
+    } catch {
+      errors.push(`Invalid API base URL: "${inputs.apiBaseUrl}". Must be a valid URL including protocol (https://).`);
+    }
+  }
+
+  if (isNaN(inputs.maxDiffLines) || inputs.maxDiffLines < 1) {
+    errors.push(`Invalid max-diff-lines: "${inputs.maxDiffLines}". Must be a positive integer.`);
+    inputs.maxDiffLines = 500; // reset to default
+  }
+
+  if (inputs.blockThreshold && !['none', 'info', 'warning', 'error', 'critical'].includes(inputs.blockThreshold)) {
+    errors.push(`Invalid block-threshold: "${inputs.blockThreshold}". Must be one of: none, info, warning, error, critical.`);
+  }
+
+  return errors;
 }
 
 // ─── Input loading ───────────────────────────────────────────────────────────
@@ -100,12 +138,19 @@ function loadInputs() {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
-const BOT_MARKER = '🤖 Powered by [AI Commit Review Bot]';
-
 async function run() {
   const startTime = Date.now();
   const inputs = loadInputs();
   const actionsCore = setupLogging(inputs.platform);
+
+  // Validate inputs before proceeding
+  const validationErrors = validateInputs(inputs);
+  if (validationErrors.length > 0) {
+    const msg = `Input validation failed:\n${validationErrors.map(e => `  - ${e}`).join('\n')}`;
+    if (actionsCore) actionsCore.setFailed(msg);
+    else { _error(msg); process.exitCode = 1; }
+    return;
+  }
 
   try {
     // 1. Create and authenticate platform adapter
@@ -177,8 +222,8 @@ async function run() {
     const files = parseDiff(rawDiff);
     _log(`📂 Found ${files.length} changed file(s)`);
 
-    // 7. Smart filtering
-    const { reviewable, skipped } = filterFiles(files);
+    // 7. Smart filtering (pass config for ignore patterns)
+    const { reviewable, skipped } = filterFiles(files, config);
     _log(`✅ ${reviewable.length} files to review, ${skipped.length} skipped`);
 
     for (const s of skipped) _log(`  ⏭️ Skipped: ${s.filename} (${s.reason})`);
@@ -351,8 +396,23 @@ function formatInlineComment(issue) {
   return comment;
 }
 
+// ─── Graceful shutdown ───────────────────────────────────────────────────────
+
+let _shuttingDown = false;
+
+function gracefulShutdown(signal) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  console.log(`\n[INFO] Received ${signal}, shutting down gracefully...`);
+  // Give pending I/O a moment to complete
+  setTimeout(() => process.exit(0), 2000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
 run();
 
-module.exports = { run, loadInputs, detectPlatform };
+module.exports = { run, loadInputs, detectPlatform, BOT_MARKER, BOT_FOOTER };

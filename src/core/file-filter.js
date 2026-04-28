@@ -24,7 +24,53 @@ const SKIP_PATTERNS = [
 
 const MAX_FILE_LINES = 500;
 
-function shouldSkipFile(filename) {
+/**
+ * Convert a glob-like pattern to a RegExp.
+ * Supports `*` and `**` wildcards.
+ */
+function globToRegex(pattern) {
+  let re = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape special regex chars
+    .replace(/\*\*/g, '{{GLOBSTAR}}')       // protect **
+    .replace(/\*/g, '[^/]*')                // * matches anything except /
+    .replace(/\?/g, '[^/]')                 // ? matches single char
+    .replace(/{{GLOBSTAR}}/g, '.*');         // ** matches everything
+
+  return new RegExp(re);
+}
+
+/**
+ * Check if a filename matches any ignore pattern (glob or regex).
+ */
+function matchesIgnorePattern(filename, ignorePatterns) {
+  if (!ignorePatterns || ignorePatterns.length === 0) return false;
+
+  for (const pattern of ignorePatterns) {
+    if (typeof pattern === 'string') {
+      // Directory prefix patterns (ending with /) only match at the start
+      if (pattern.endsWith('/')) {
+        if (filename.startsWith(pattern)) return true;
+        // Also match if filename is exactly the directory name without trailing /
+        if (filename === pattern.slice(0, -1)) return true;
+        continue;
+      }
+      // Treat as glob pattern
+      const regex = globToRegex(pattern);
+      if (regex.test(filename)) return true;
+    } else if (pattern instanceof RegExp) {
+      if (pattern.test(filename)) return true;
+    }
+  }
+  return false;
+}
+
+function shouldSkipFile(filename, ignorePatterns) {
+  // Check user-defined ignore patterns first
+  if (matchesIgnorePattern(filename, ignorePatterns)) {
+    return { skip: true, reason: 'matches ignore pattern' };
+  }
+
+  // Check built-in skip patterns
   for (const pattern of SKIP_PATTERNS) {
     if (pattern.test(filename)) {
       return { skip: true, reason: `matches skip pattern: ${pattern}` };
@@ -33,20 +79,37 @@ function shouldSkipFile(filename) {
   return { skip: false };
 }
 
-function filterFiles(files) {
+/**
+ * Check if a diff chunk looks like a binary file diff.
+ */
+function isBinaryDiff(patch) {
+  if (!patch) return false;
+  // Git marks binary files with "Binary files ... differ" or "GIT binary patch"
+  return /^Binary files .+ differ$/m.test(patch) || /^GIT binary patch$/m.test(patch);
+}
+
+function filterFiles(files, config = {}) {
   const reviewable = [];
   const skipped = [];
+  const ignorePatterns = config.ignore || [];
+  const maxFileLines = config.filter?.max_file_lines || MAX_FILE_LINES;
 
   for (const file of files) {
-    const check = shouldSkipFile(file.filename);
+    // Check if it's a binary file diff
+    if (isBinaryDiff(file.patch)) {
+      skipped.push({ filename: file.filename, reason: 'binary file' });
+      continue;
+    }
+
+    const check = shouldSkipFile(file.filename, ignorePatterns);
     if (check.skip) {
       skipped.push({ filename: file.filename, reason: check.reason });
       continue;
     }
 
     const lineCount = file.patch.split('\n').length;
-    if (lineCount > MAX_FILE_LINES) {
-      skipped.push({ filename: file.filename, reason: `too large (${lineCount} lines > ${MAX_FILE_LINES})` });
+    if (lineCount > maxFileLines) {
+      skipped.push({ filename: file.filename, reason: `too large (${lineCount} lines > ${maxFileLines})` });
       continue;
     }
 
@@ -66,4 +129,4 @@ function filterFiles(files) {
   return { reviewable, skipped };
 }
 
-module.exports = { shouldSkipFile, filterFiles, SKIP_PATTERNS, MAX_FILE_LINES };
+module.exports = { shouldSkipFile, filterFiles, matchesIgnorePattern, isBinaryDiff, SKIP_PATTERNS, MAX_FILE_LINES };

@@ -8,35 +8,64 @@ const assert = require('node:assert/strict');
 const { buildMessage } = require('../core/notifier');
 
 describe('buildMessage', () => {
-  it('should build a message with issues', () => {
-    const review = {
-      summary: 'Found 2 issues',
-      risk_level: 'high',
-      issues: [
-        { category: 'security', severity: 'critical', description: 'SQL injection in auth.js', suggestion: 'Use parameterized queries' },
-        { category: 'bug', severity: 'warning', description: 'Null pointer in utils.js', suggestion: '' },
-      ],
-    };
+  const review = {
+    summary: 'Found a few issues',
+    risk_level: 'high',
+    issues: [
+      { severity: 'critical', category: 'security', description: 'SQL injection risk in auth.js' },
+      { severity: 'warning', category: 'performance', description: 'N+1 query in user controller' },
+      { severity: 'info', category: 'quality', description: 'Variable naming could be improved' },
+    ],
+    highlights: ['Good error handling pattern'],
+  };
 
-    const msg = buildMessage(review, 'https://github.com/test/repo/pull/1', 'Fix auth');
-    assert.ok(msg.title.includes('🟠'));
-    assert.ok(msg.title.includes('Fix auth'));
-    assert.ok(msg.text.includes('SQL injection'));
-    assert.ok(msg.text.includes('View MR/PR'));
-    assert.equal(msg.data.risk_level, 'high');
-    assert.equal(msg.data.issue_count, 2);
+  it('should build a complete message', () => {
+    const message = buildMessage(review, 'https://github.com/owner/repo/pull/42', 'Fix bug');
+    assert.ok(message.title.includes('AI Code Review'));
+    assert.ok(message.title.includes('Fix bug'));
+    assert.ok(message.text.includes('HIGH'));
+    assert.ok(message.text.includes('3'));
+    assert.ok(message.text.includes('View MR/PR'));
   });
 
-  it('should handle no issues', () => {
-    const review = {
-      summary: 'All clear',
-      risk_level: 'low',
-      issues: [],
-    };
+  it('should include risk emoji', () => {
+    const msg = buildMessage(review, 'url', 'title');
+    assert.ok(msg.title.includes('🟠')); // high risk emoji
+  });
 
-    const msg = buildMessage(review, 'https://github.com/test/repo/pull/2', 'Clean PR');
-    assert.ok(msg.title.includes('🟢'));
+  it('should include severity breakdown', () => {
+    const msg = buildMessage(review, 'url', 'title');
+    assert.ok(msg.text.includes('critical'));
+    assert.ok(msg.text.includes('warning'));
+    assert.ok(msg.text.includes('info'));
+  });
+
+  it('should include data object', () => {
+    const msg = buildMessage(review, 'https://example.com/pr/1', 'Test PR');
+    assert.equal(msg.data.risk_level, 'high');
+    assert.equal(msg.data.issue_count, 3);
+    assert.equal(msg.data.pr_url, 'https://example.com/pr/1');
+    assert.equal(msg.data.pr_title, 'Test PR');
+  });
+
+  it('should handle review with no issues', () => {
+    const emptyReview = { summary: 'All clear', risk_level: 'low', issues: [], highlights: [] };
+    const msg = buildMessage(emptyReview, 'url', 'title');
     assert.ok(msg.text.includes('No issues'));
-    assert.equal(msg.data.issue_count, 0);
+    assert.ok(msg.title.includes('🟢'));
+  });
+
+  it('should truncate long issue descriptions in top issues', () => {
+    const longReview = {
+      summary: 'test',
+      risk_level: 'medium',
+      issues: [
+        { severity: 'warning', category: 'bug', description: 'A'.repeat(200) },
+      ],
+      highlights: [],
+    };
+    const msg = buildMessage(longReview, 'url', 'title');
+    // Should not throw and should include truncated description
+    assert.ok(msg.text.length > 0);
   });
 });

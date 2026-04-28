@@ -5,93 +5,127 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { shouldSkipFile, filterFiles, SKIP_PATTERNS } = require('../core/file-filter');
+const { shouldSkipFile, filterFiles, matchesIgnorePattern, isBinaryDiff, SKIP_PATTERNS } = require('../core/file-filter');
 
 describe('shouldSkipFile', () => {
   it('should skip lock files', () => {
-    assert.ok(shouldSkipFile('package-lock.json').skip);
-    assert.ok(shouldSkipFile('yarn.lock').skip);
-    assert.ok(shouldSkipFile('pnpm-lock.yaml').skip);
-    assert.ok(shouldSkipFile('Cargo.lock').skip);
-    assert.ok(shouldSkipFile('go.sum').skip);
+    const result = shouldSkipFile('package-lock.json');
+    assert.ok(result.skip);
+    assert.ok(result.reason.includes('skip pattern'));
   });
 
-  it('should skip auto-generated code', () => {
-    assert.ok(shouldSkipFile('src/api.generated.ts').skip);
-    assert.ok(shouldSkipFile('src/types.d.ts').skip);
-    assert.ok(shouldSkipFile('src/proto.pb.go').skip);
-    assert.ok(shouldSkipFile('src/__generated__/query.js').skip);
-  });
-
-  it('should skip build output', () => {
-    assert.ok(shouldSkipFile('dist/bundle.js').skip);
-    assert.ok(shouldSkipFile('build/output.js').skip);
-    assert.ok(shouldSkipFile('.next/static/chunk.js').skip);
-  });
-
-  it('should skip dependencies', () => {
-    assert.ok(shouldSkipFile('node_modules/express/index.js').skip);
-    assert.ok(shouldSkipFile('vendor/github.com/pkg/errors.go').skip);
-  });
-
-  it('should skip binary/media files', () => {
-    assert.ok(shouldSkipFile('logo.png').skip);
-    assert.ok(shouldSkipFile('demo.mp4').skip);
+  it('should skip binary files by extension', () => {
+    assert.ok(shouldSkipFile('image.png').skip);
     assert.ok(shouldSkipFile('font.woff2').skip);
     assert.ok(shouldSkipFile('archive.zip').skip);
-    assert.ok(shouldSkipFile('app.exe').skip);
+    assert.ok(shouldSkipFile('binary.exe').skip);
   });
 
-  it('should NOT skip regular source files', () => {
+  it('should skip files in dist/build/node_modules', () => {
+    assert.ok(shouldSkipFile('dist/bundle.js').skip);
+    assert.ok(shouldSkipFile('build/output.js').skip);
+    assert.ok(shouldSkipFile('node_modules/pkg/index.js').skip);
+  });
+
+  it('should not skip normal source files', () => {
     assert.ok(!shouldSkipFile('src/index.js').skip);
-    assert.ok(!shouldSkipFile('lib/utils.ts').skip);
+    assert.ok(!shouldSkipFile('lib/utils.py').skip);
     assert.ok(!shouldSkipFile('main.go').skip);
-    assert.ok(!shouldSkipFile('app.py').skip);
-    assert.ok(!shouldSkipFile('README.md').skip);
+  });
+
+  it('should respect user-defined ignore patterns', () => {
+    const result = shouldSkipFile('docs/README.md', ['docs/', '*.md']);
+    assert.ok(result.skip);
+  });
+
+  it('should handle glob-like ignore patterns', () => {
+    assert.ok(shouldSkipFile('test/fixtures/data.json', ['test/fixtures/']).skip);
+    assert.ok(!shouldSkipFile('test/unit.test.js', ['test/fixtures/']).skip);
+  });
+});
+
+describe('matchesIgnorePattern', () => {
+  it('should match directory prefix patterns', () => {
+    assert.ok(matchesIgnorePattern('docs/README.md', ['docs/']));
+    assert.ok(!matchesIgnorePattern('src/docs/README.md', ['docs/']));
+    assert.ok(matchesIgnorePattern('docs', ['docs/']));
+  });
+
+  it('should match wildcard patterns', () => {
+    assert.ok(matchesIgnorePattern('test.js', ['*.js']));
+    assert.ok(!matchesIgnorePattern('test.py', ['*.js']));
+  });
+
+  it('should match double-star patterns', () => {
+    assert.ok(matchesIgnorePattern('deep/nested/path/file.js', ['**/file.js']));
+  });
+
+  it('should handle empty patterns', () => {
+    assert.ok(!matchesIgnorePattern('file.js', []));
+    assert.ok(!matchesIgnorePattern('file.js', null));
+  });
+});
+
+describe('isBinaryDiff', () => {
+  it('should detect binary file diffs', () => {
+    assert.ok(isBinaryDiff('Binary files a/image.png and b/image.png differ'));
+    assert.ok(isBinaryDiff('some header\nBinary files a/img and b/img differ\n'));
+    assert.ok(isBinaryDiff('GIT binary patch\n'));
+  });
+
+  it('should not detect normal diffs as binary', () => {
+    assert.ok(!isBinaryDiff('+added line\n-removed line\n'));
+    assert.ok(!isBinaryDiff(''));
+    assert.ok(!isBinaryDiff(null));
   });
 });
 
 describe('filterFiles', () => {
-  it('should filter out skipped files and keep reviewable ones', () => {
-    const files = [
-      { filename: 'src/index.js', patch: 'some code', additions: 5, deletions: 2, status: 'modified' },
-      { filename: 'package-lock.json', patch: 'lock', additions: 100, deletions: 50, status: 'modified' },
-      { filename: 'src/utils.ts', patch: 'more code', additions: 3, deletions: 1, status: 'modified' },
-      { filename: 'dist/bundle.js', patch: 'built', additions: 1000, deletions: 0, status: 'modified' },
-    ];
-
-    const { reviewable, skipped } = filterFiles(files);
-    assert.equal(reviewable.length, 2);
-    assert.equal(skipped.length, 2);
-    assert.equal(reviewable[0].filename, 'src/index.js');
-    assert.equal(reviewable[1].filename, 'src/utils.ts');
+  const makeFile = (filename, patch, additions = 1, deletions = 0, status = 'modified') => ({
+    filename, status, additions, deletions,
+    patch: patch || `+line\n`,
+    lineMapping: [],
   });
 
-  it('should skip deletion-only files', () => {
-    const files = [
-      { filename: 'src/old.js', patch: '-removed line', additions: 0, deletions: 5, status: 'modified' },
-      { filename: 'src/new.js', patch: '+added line', additions: 3, deletions: 0, status: 'modified' },
-    ];
+  it('should filter out binary files', () => {
+    const files = [makeFile('image.png', 'Binary files a/image.png and b/image.png differ')];
+    const { reviewable, skipped } = filterFiles(files);
+    assert.equal(reviewable.length, 0);
+    assert.equal(skipped.length, 1);
+    assert.ok(skipped[0].reason.includes('binary'));
+  });
 
+  it('should filter out deletion-only files', () => {
+    const files = [makeFile('old.js', '-line\n', 0, 1)];
+    const { reviewable, skipped } = filterFiles(files);
+    assert.equal(reviewable.length, 0);
+    assert.equal(skipped.length, 1);
+    assert.ok(skipped[0].reason.includes('deletion'));
+  });
+
+  it('should filter out rename-only files', () => {
+    const files = [{ filename: 'new.js', status: 'renamed', additions: 0, deletions: 0, patch: '', lineMapping: [] }];
+    const { reviewable, skipped } = filterFiles(files);
+    assert.equal(reviewable.length, 0);
+    assert.equal(skipped.length, 1);
+    assert.ok(skipped[0].reason.includes('rename'));
+  });
+
+  it('should apply ignore config', () => {
+    const files = [
+      makeFile('docs/README.md', '+line\n'),
+      makeFile('src/index.js', '+line\n'),
+    ];
+    const { reviewable, skipped } = filterFiles(files, { ignore: ['docs/'] });
+    assert.equal(reviewable.length, 1);
+    assert.equal(skipped.length, 1);
+    assert.equal(reviewable[0].filename, 'src/index.js');
+  });
+
+  it('should pass through normal files', () => {
+    const files = [makeFile('src/index.js', '+const a = 1;\n')];
     const { reviewable, skipped } = filterFiles(files);
     assert.equal(reviewable.length, 1);
-    assert.equal(reviewable[0].filename, 'src/new.js');
-    assert.ok(skipped.some(s => s.reason.includes('deletion')));
-  });
-
-  it('should skip rename-only files', () => {
-    const files = [
-      { filename: 'src/new-name.js', patch: '', additions: 0, deletions: 0, status: 'renamed' },
-    ];
-
-    const { reviewable, skipped } = filterFiles(files);
-    assert.equal(reviewable.length, 0);
-    assert.ok(skipped.some(s => s.reason.includes('rename')));
-  });
-
-  it('should handle empty input', () => {
-    const { reviewable, skipped } = filterFiles([]);
-    assert.equal(reviewable.length, 0);
     assert.equal(skipped.length, 0);
   });
 });

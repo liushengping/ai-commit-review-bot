@@ -9,10 +9,17 @@ const INITIAL_DELAY_MS = 1000;
  */
 function sanitizeError(error) {
   let msg = error.message || String(error);
+  // Redact Bearer tokens
   msg = msg.replace(/Bearer\s+[A-Za-z0-9\-_.~+/]+=*/gi, 'Bearer [REDACTED]');
+  // Redact x-api-key headers
   msg = msg.replace(/x-api-key:\s*[A-Za-z0-9\-_.~+/]+=*/gi, 'x-api-key: [REDACTED]');
+  // Redact PRIVATE-TOKEN headers (GitLab)
+  msg = msg.replace(/PRIVATE-TOKEN:\s*[A-Za-z0-9\-_.~+/]+=*/gi, 'PRIVATE-TOKEN: [REDACTED]');
+  // Redact Authorization headers
+  msg = msg.replace(/Authorization:\s*[A-Za-z0-9\-_.~+/]+=*/gi, 'Authorization: [REDACTED]');
+  // Redact long token-like strings (lowered threshold from 30 to 20 for shorter keys)
   msg = msg.replace(/[A-Za-z0-9]{20,}/g, (match) => {
-    if (match.length > 30) return '[REDACTED]';
+    if (match.length > 20) return '[REDACTED]';
     return match;
   });
   return msg;
@@ -102,7 +109,7 @@ function callOpenAICompatible({ apiKey, apiBaseUrl, model, messages, maxTokens }
           const content = json.choices?.[0]?.message?.content || '';
           resolve(content);
         } catch (e) {
-          reject(new Error(`Failed to parse API response: ${data.substring(0, 500)}`));
+          reject(new Error(`Failed to parse API response (status ${res.statusCode})`));
         }
       });
     });
@@ -161,7 +168,7 @@ function callAnthropic({ apiKey, apiBaseUrl, model, messages, maxTokens }) {
           const content = json.content?.[0]?.text || '';
           resolve(content);
         } catch (e) {
-          reject(new Error(`Failed to parse API response: ${data.substring(0, 500)}`));
+          reject(new Error(`Failed to parse API response (status ${res.statusCode})`));
         }
       });
     });
