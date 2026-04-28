@@ -45,6 +45,21 @@ inputs:
     required: false
     default: 'true'
 
+  auto-approve:
+    description: 'Auto-approve PR if no issues are found'
+    required: false
+    default: 'false'
+
+  inline-comments:
+    description: 'Post inline comments on specific code lines with issues'
+    required: false
+    default: 'true'
+
+  block-threshold:
+    description: 'Minimum severity level to block the PR (none, info, warning, error, critical)'
+    required: false
+    default: 'critical'
+
 runs:
   using: 'node20'
   main: 'src/index.js'

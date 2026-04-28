@@ -1,0 +1,38 @@
+# AI Commit Review Bot - Configuration
+# Place this file as .review.yml in your repo root
+
+# Review settings
+review:
+  language: zh              # zh | en
+  max_diff_lines: 500
+  skip_if_no_diff: true
+  auto_approve: false       # Auto-approve PR if no issues found
+  fail_on_critical: true    # Fail action if critical issues found
+
+# File filtering
+filter:
+  max_file_lines: 500       # Skip files with more lines than this
+  skip_patterns:            # Additional patterns to skip (regex)
+    - "\\.test\\."
+    - "\\.spec\\."
+    - "__tests__/"
+  review_patterns:          # Only review files matching these (empty = all)
+    - ".*"
+
+# Severity thresholds
+severity:
+  block_threshold: critical  # none | info | warning | error | critical
+  inline_threshold: warning  # Minimum severity for inline comments
+
+# Custom review prompt (appended to the default prompt)
+custom_prompt: |
+  重点关注：
+  - 任何硬编码的密钥或凭证
+  - 不当的错误处理
+  - 可能的 SQL 注入
+
+# Files/paths to always ignore
+ignore:
+  - "docs/"
+  - "*.md"
+  - "CHANGELOG"
