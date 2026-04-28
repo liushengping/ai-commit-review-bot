@@ -1,0 +1,17 @@
+# Bitbucket Pipelines example
+# Place in bitbucket-pipelines.yml
+
+pipelines:
+  pull-requests:
+    '**':
+      - step:
+          name: AI Code Review
+          image: node:20
+          script:
+            - export REVIEW_PLATFORM=bitbucket
+            - export BITBUCKET_TOKEN=$BITBUCKET_TOKEN    # Repository variables
+            - export AI_API_KEY=$AI_API_KEY              # Repository variables
+            - export AI_API_BASE_URL="https://api.xiaomimimo.com/v1"
+            - export AI_MODEL="MiMo-V2.5-Pro"
+            - npm install --production
+            - node src/index.js

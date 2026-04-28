@@ -1,3 +1,6 @@
+/**
+ * AI reviewer - platform-agnostic review logic
+ */
 const { callAI } = require('./ai-client');
 
 const REVIEW_PROMPT_ZH = `你是一位资深代码审查专家。请对以下 Pull Request 的代码变更进行审查。
@@ -82,19 +85,12 @@ Output ONLY valid JSON (no markdown, no explanation):
 
 `;
 
-/**
- * Build the review prompt based on language
- */
 function getReviewPrompt(language) {
   return language === 'en' ? REVIEW_PROMPT_EN : REVIEW_PROMPT_ZH;
 }
 
-/**
- * Build per-language/file-pattern rules section
- */
 function buildLanguageRulesPrompt(languageRules) {
   if (!languageRules || !Array.isArray(languageRules) || languageRules.length === 0) return '';
-
   let section = '\n\n## Language/Framework Specific Rules\n\n';
   for (const rule of languageRules) {
     if (rule.pattern && rule.prompt) {
@@ -104,9 +100,6 @@ function buildLanguageRulesPrompt(languageRules) {
   return section;
 }
 
-/**
- * Call AI to review the diff (with optional fallback model)
- */
 async function reviewDiff({ diffText, language, provider, apiKey, apiBaseUrl, model, fallbackModel, customPrompt, languageRules }) {
   const systemPrompt = language === 'en'
     ? 'You are an expert code reviewer. Output only valid JSON. Every issue MUST have a line number.'
@@ -114,22 +107,12 @@ async function reviewDiff({ diffText, language, provider, apiKey, apiBaseUrl, mo
 
   let userPrompt = getReviewPrompt(language) + diffText;
 
-  // Add language-specific rules
   const langRulesPrompt = buildLanguageRulesPrompt(languageRules);
-  if (langRulesPrompt) {
-    userPrompt += langRulesPrompt;
-  }
-
-  if (customPrompt) {
-    userPrompt += '\n\n## Additional Review Instructions\n\n' + customPrompt;
-  }
+  if (langRulesPrompt) userPrompt += langRulesPrompt;
+  if (customPrompt) userPrompt += '\n\n## Additional Review Instructions\n\n' + customPrompt;
 
   const response = await callAI({
-    provider,
-    apiKey,
-    apiBaseUrl,
-    model,
-    fallbackModel,
+    provider, apiKey, apiBaseUrl, model, fallbackModel,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
@@ -140,31 +123,21 @@ async function reviewDiff({ diffText, language, provider, apiKey, apiBaseUrl, mo
   return parseReviewResponse(response);
 }
 
-/**
- * Parse AI response into structured review
- */
 function parseReviewResponse(response) {
   let jsonStr = response.trim();
-
-  // Remove markdown code block if present
   const codeBlockMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (codeBlockMatch) {
-    jsonStr = codeBlockMatch[1].trim();
-  }
+  if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
 
   try {
     const review = JSON.parse(jsonStr);
-
     return {
       summary: review.summary || 'Review completed.',
-      risk_level: ['low', 'medium', 'high', 'critical'].includes(review.risk_level)
-        ? review.risk_level : 'medium',
+      risk_level: ['low', 'medium', 'high', 'critical'].includes(review.risk_level) ? review.risk_level : 'medium',
       issues: Array.isArray(review.issues) ? review.issues.map(issue => ({
         file: issue.file || 'unknown',
         line: parseInt(issue.line, 10) || 0,
         end_line: parseInt(issue.end_line, 10) || undefined,
-        severity: ['info', 'warning', 'error', 'critical'].includes(issue.severity)
-          ? issue.severity : 'warning',
+        severity: ['info', 'warning', 'error', 'critical'].includes(issue.severity) ? issue.severity : 'warning',
         category: issue.category || 'quality',
         description: issue.description || '',
         suggestion: issue.suggestion || '',
@@ -181,39 +154,18 @@ function parseReviewResponse(response) {
   }
 }
 
-/**
- * Format review into a GitHub-friendly markdown comment
- */
 function formatReviewComment(review, language, meta = {}) {
-  const riskEmoji = {
-    low: '🟢',
-    medium: '🟡',
-    high: '🟠',
-    critical: '🔴',
-  };
-
-  const severityEmoji = {
-    info: 'ℹ️',
-    warning: '⚠️',
-    error: '❌',
-    critical: '🚨',
-  };
-
+  const riskEmoji = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
+  const severityEmoji = { info: 'ℹ️', warning: '⚠️', error: '❌', critical: '🚨' };
   const categoryLabel = {
-    bug: '🐛 Bug',
-    security: '🔒 安全',
-    performance: '⚡ 性能',
-    quality: '📝 代码质量',
-    missing: '📋 缺失处理',
+    bug: '🐛 Bug', security: '🔒 安全', performance: '⚡ 性能',
+    quality: '📝 代码质量', missing: '📋 缺失处理',
   };
 
   const parts = [];
-
-  // Header
   parts.push(`## ${riskEmoji[review.risk_level] || '🟡'} AI Code Review`);
   parts.push('');
 
-  // Incremental review badge
   if (meta.incremental) {
     parts.push('> 🆕 **Incremental review** — only reviewing changes since last review');
     parts.push('');
@@ -223,18 +175,14 @@ function formatReviewComment(review, language, meta = {}) {
   parts.push(`> Risk Level: **${review.risk_level.toUpperCase()}**`);
   parts.push('');
 
-  // Token usage info
   if (meta.totalTokens) {
     parts.push(`> 📊 Estimated tokens: ~${meta.totalTokens.toLocaleString()}${meta.truncated ? ' (truncated)' : ''}`);
     parts.push('');
   }
 
-  // Issues summary
   if (review.issues.length > 0) {
     const bySeverity = {};
-    for (const issue of review.issues) {
-      bySeverity[issue.severity] = (bySeverity[issue.severity] || 0) + 1;
-    }
+    for (const issue of review.issues) bySeverity[issue.severity] = (bySeverity[issue.severity] || 0) + 1;
     const summaryParts = [];
     if (bySeverity.critical) summaryParts.push(`🚨 ${bySeverity.critical} critical`);
     if (bySeverity.error) summaryParts.push(`❌ ${bySeverity.error} error`);
@@ -242,23 +190,16 @@ function formatReviewComment(review, language, meta = {}) {
     if (bySeverity.info) summaryParts.push(`ℹ️ ${bySeverity.info} info`);
     parts.push(`> ${summaryParts.join(' · ')}`);
     parts.push('');
-  }
 
-  // Issues detail
-  if (review.issues.length > 0) {
     parts.push(`### Issues Found (${review.issues.length})`);
     parts.push('');
-
     for (const issue of review.issues) {
       const emoji = severityEmoji[issue.severity] || '⚠️';
       const category = categoryLabel[issue.category] || issue.category;
       const location = issue.line ? `${issue.file}:${issue.line}` : issue.file;
-
       parts.push(`${emoji} **${category}** — \`${location}\``);
       parts.push(`> ${issue.description}`);
-      if (issue.suggestion) {
-        parts.push(`> 💡 **Suggestion:** ${issue.suggestion}`);
-      }
+      if (issue.suggestion) parts.push(`> 💡 **Suggestion:** ${issue.suggestion}`);
       parts.push('');
     }
   } else {
@@ -268,17 +209,13 @@ function formatReviewComment(review, language, meta = {}) {
     parts.push('');
   }
 
-  // Highlights
   if (review.highlights.length > 0) {
     parts.push('### 🌟 Highlights');
     parts.push('');
-    for (const h of review.highlights) {
-      parts.push(`- ${h}`);
-    }
+    for (const h of review.highlights) parts.push(`- ${h}`);
     parts.push('');
   }
 
-  // Review stats summary
   if (meta.stats) {
     parts.push('### 📈 Review Statistics');
     parts.push('');
@@ -289,20 +226,16 @@ function formatReviewComment(review, language, meta = {}) {
     parts.push('');
   }
 
-  // Meta info (skipped files, token usage, etc.)
   if (meta.skippedFiles && meta.skippedFiles.length > 0) {
     parts.push('<details>');
     parts.push('<summary>📂 Skipped Files</summary>');
     parts.push('');
-    for (const f of meta.skippedFiles) {
-      parts.push(`- \`${f.filename}\` — ${f.reason}`);
-    }
+    for (const f of meta.skippedFiles) parts.push(`- \`${f.filename}\` — ${f.reason}`);
     parts.push('');
     parts.push('</details>');
     parts.push('');
   }
 
-  // Footer
   const modelInfo = meta.model ? ` | Model: ${meta.model}` : '';
   parts.push('---');
   parts.push(`<sub>🤖 Powered by [AI Commit Review Bot](https://github.com/liushengping/ai-commit-review-bot)${modelInfo}</sub>`);
@@ -310,27 +243,10 @@ function formatReviewComment(review, language, meta = {}) {
   return parts.join('\n');
 }
 
-/**
- * Severity level mapping for comparison
- */
-const SEVERITY_LEVELS = {
-  info: 0,
-  warning: 1,
-  error: 2,
-  critical: 3,
-};
+const SEVERITY_LEVELS = { info: 0, warning: 1, error: 2, critical: 3 };
 
-/**
- * Check if an issue severity meets the threshold
- */
 function meetsSeverityThreshold(severity, threshold) {
   return (SEVERITY_LEVELS[severity] || 0) >= (SEVERITY_LEVELS[threshold] || 0);
 }
 
-module.exports = {
-  reviewDiff,
-  formatReviewComment,
-  parseReviewResponse,
-  meetsSeverityThreshold,
-  SEVERITY_LEVELS,
-};
+module.exports = { reviewDiff, formatReviewComment, parseReviewResponse, meetsSeverityThreshold, SEVERITY_LEVELS };

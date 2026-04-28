@@ -1,0 +1,20 @@
+# GitLab CI example
+# Place in .gitlab-ci.yml
+
+ai-code-review:
+  stage: review
+  image: node:20
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    REVIEW_PLATFORM: gitlab
+    GITLAB_TOKEN: $GITLAB_TOKEN        # Set in CI/CD variables
+    AI_API_KEY: $AI_API_KEY            # Set in CI/CD variables
+    AI_API_BASE_URL: "https://api.xiaomimimo.com/v1"
+    AI_MODEL: "MiMo-V2.5-Pro"
+    AI_FALLBACK_MODEL: "deepseek-chat"
+    REVIEW_LANGUAGE: "zh"
+    REVIEW_AUTO_APPROVE: "true"
+  script:
+    - npm install --production
+    - node src/index.js

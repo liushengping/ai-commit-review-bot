@@ -9,27 +9,19 @@ const INITIAL_DELAY_MS = 1000;
  */
 function sanitizeError(error) {
   let msg = error.message || String(error);
-  // Redact anything that looks like an API key or token
   msg = msg.replace(/Bearer\s+[A-Za-z0-9\-_.~+/]+=*/gi, 'Bearer [REDACTED]');
   msg = msg.replace(/x-api-key:\s*[A-Za-z0-9\-_.~+/]+=*/gi, 'x-api-key: [REDACTED]');
   msg = msg.replace(/[A-Za-z0-9]{20,}/g, (match) => {
-    // Only redact strings that look like tokens (long alphanumeric)
     if (match.length > 30) return '[REDACTED]';
     return match;
   });
   return msg;
 }
 
-/**
- * Sleep utility for retry delays
- */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/**
- * Determine if an error is retryable (429, 5xx, network errors)
- */
 function isRetryableError(error, statusCode) {
   if (statusCode && (statusCode === 429 || statusCode >= 500)) return true;
   const msg = (error.message || '').toLowerCase();
@@ -61,11 +53,10 @@ async function callAI({ provider, apiKey, apiBaseUrl, model, fallbackModel, mess
           console.warn(`API call attempt ${attempt + 1} failed (${error.message}), retrying in ${Math.round(delay)}ms...`);
           await sleep(delay);
         } else {
-          break; // Non-retryable error or last attempt
+          break;
         }
       }
     }
-    // Move to fallback model if available
     if (currentModel !== models[models.length - 1]) {
       console.warn(`Model ${currentModel} failed, trying fallback...`);
     }
@@ -131,7 +122,6 @@ function callAnthropic({ apiKey, apiBaseUrl, model, messages, maxTokens }) {
   const isHttps = url.protocol === 'https:';
   const transport = isHttps ? https : http;
 
-  // Convert from OpenAI message format to Anthropic format
   const systemMsg = messages.find(m => m.role === 'system')?.content || '';
   const userMessages = messages
     .filter(m => m.role !== 'system')

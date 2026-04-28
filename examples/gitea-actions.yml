@@ -1,0 +1,22 @@
+# Gitea Actions example
+# Place in .gitea/workflows/review.yml
+
+name: AI Code Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: liushengping/ai-commit-review-bot@main
+        env:
+          REVIEW_PLATFORM: gitea
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_URL: ${{ secrets.GITEA_URL }}       # e.g. https://gitea.example.com
+        with:
+          api-key: ${{ secrets.AI_API_KEY }}
+          api-base-url: 'https://api.xiaomimimo.com/v1'
+          model: 'MiMo-V2.5-Pro'

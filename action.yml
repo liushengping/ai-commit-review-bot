@@ -1,16 +1,38 @@
 name: 'AI Commit Review Bot'
-description: 'Automated AI-powered code review for Pull Requests. Supports MiMo, Claude, GPT and more.'
+description: 'Automated AI-powered code review for Pull Requests. Supports GitHub, GitLab, Bitbucket, Gitea. Works with MiMo, Claude, GPT and more.'
 
 branding:
   icon: 'check-circle'
   color: 'blue'
 
 inputs:
+  # ── Platform ───────────────────────────────────────────────
+  platform:
+    description: 'SCM platform: github, gitlab, gitea, bitbucket (auto-detected if omitted)'
+    required: false
+    default: ''
+
   github-token:
     description: 'GitHub token for posting review comments'
-    required: true
+    required: false
     default: '${{ github.token }}'
 
+  gitlab-token:
+    description: 'GitLab token (for GitLab CI)'
+    required: false
+    default: ''
+
+  gitea-token:
+    description: 'Gitea token (for Gitea Actions)'
+    required: false
+    default: ''
+
+  bitbucket-token:
+    description: 'Bitbucket token (for Bitbucket Pipelines)'
+    required: false
+    default: ''
+
+  # ── AI Model ───────────────────────────────────────────────
   api-key:
     description: 'API key for the AI model provider'
     required: true
@@ -35,6 +57,7 @@ inputs:
     required: false
     default: 'openai-compatible'
 
+  # ── Review Options ─────────────────────────────────────────
   max-diff-lines:
     description: 'Maximum number of diff lines to send for review (to control token usage)'
     required: false

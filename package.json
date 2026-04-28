@@ -1,24 +1,32 @@
 {
   "name": "ai-commit-review-bot",
-  "version": "2.0.0",
-  "description": "AI-powered code review bot for GitHub Pull Requests. Supports MiMo, Claude, GPT and more.",
+  "version": "3.0.0",
+  "description": "AI-powered code review bot for GitHub, GitLab, Bitbucket, Gitea. Supports MiMo, Claude, GPT and more.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test src/__tests__/*.test.js"
+    "test": "node --test src/__tests__/*.test.js",
+    "test:core": "node --test src/__tests__/core.test.js",
+    "test:platforms": "node --test src/__tests__/platforms.test.js"
   },
   "keywords": [
-    "github-action",
     "code-review",
     "ai",
     "mimo",
     "llm",
-    "pull-request"
+    "github-action",
+    "gitlab-ci",
+    "gitea",
+    "bitbucket",
+    "pull-request",
+    "merge-request"
   ],
-  "author": "",
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^1.10.1",
     "@actions/github": "^6.0.0"
+  },
+  "optionalDependencies": {
+    "@octokit/rest": "^20.0.0"
   }
 }
