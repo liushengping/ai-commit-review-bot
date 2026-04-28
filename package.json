@@ -1,0 +1,24 @@
+{
+  "name": "ai-commit-review-bot",
+  "version": "1.0.0",
+  "description": "AI-powered code review bot for GitHub Pull Requests. Supports MiMo, Claude, GPT and other models.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node src/test.js"
+  },
+  "keywords": [
+    "github-action",
+    "code-review",
+    "ai",
+    "mimo",
+    "llm",
+    "pull-request"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.10.1",
+    "@actions/github": "^6.0.0"
+  }
+}
