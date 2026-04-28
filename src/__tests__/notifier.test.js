@@ -5,7 +5,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { buildMessage } = require('../notifier');
+const { buildMessage } = require('../core/notifier');
 
 describe('buildMessage', () => {
   it('should build a message with issues', () => {
@@ -22,7 +22,7 @@ describe('buildMessage', () => {
     assert.ok(msg.title.includes('🟠'));
     assert.ok(msg.title.includes('Fix auth'));
     assert.ok(msg.text.includes('SQL injection'));
-    assert.ok(msg.text.includes('View PR'));
+    assert.ok(msg.text.includes('View MR/PR'));
     assert.equal(msg.data.risk_level, 'high');
     assert.equal(msg.data.issue_count, 2);
   });

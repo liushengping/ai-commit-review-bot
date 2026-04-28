@@ -5,7 +5,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { sanitizeError } = require('../ai-client');
+const { sanitizeError } = require('../core/ai-client');
 
 describe('sanitizeError', () => {
   it('should redact Bearer tokens', () => {

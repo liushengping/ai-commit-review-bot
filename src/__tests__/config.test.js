@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { loadConfig, DEFAULT_CONFIG } = require('../config');
+const { loadConfig, DEFAULT_CONFIG } = require('../core/config');
 
 describe('loadConfig', () => {
   let tmpDir;

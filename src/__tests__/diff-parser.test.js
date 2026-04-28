@@ -5,7 +5,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseDiff, truncateDiff, formatDiffForReview, mapDiffLineToNewFile, estimateTokens } = require('../diff-parser');
+const { parseDiff, truncateDiff, formatDiffForReview, mapDiffLineToNewFile, estimateTokens } = require('../core/diff-parser');
 
 describe('parseDiff', () => {
   it('should return empty array for null/empty input', () => {

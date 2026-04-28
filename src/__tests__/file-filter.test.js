@@ -5,7 +5,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { shouldSkipFile, filterFiles, SKIP_PATTERNS } = require('../file-filter');
+const { shouldSkipFile, filterFiles, SKIP_PATTERNS } = require('../core/file-filter');
 
 describe('shouldSkipFile', () => {
   it('should skip lock files', () => {

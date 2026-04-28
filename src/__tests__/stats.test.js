@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { loadStats, recordReview, formatStatsSummary } = require('../stats');
+const { loadStats, recordReview, formatStatsSummary } = require('../core/stats');
 
 function makeTmpDir() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stats-test-'));

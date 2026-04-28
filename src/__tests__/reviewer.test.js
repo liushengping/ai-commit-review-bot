@@ -5,7 +5,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseReviewResponse, formatReviewComment, meetsSeverityThreshold, SEVERITY_LEVELS } = require('../reviewer');
+const { parseReviewResponse, formatReviewComment, meetsSeverityThreshold, SEVERITY_LEVELS } = require('../core/reviewer');
 
 describe('parseReviewResponse', () => {
   it('should parse valid JSON response', () => {
