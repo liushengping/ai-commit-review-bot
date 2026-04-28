@@ -1,14 +1,76 @@
 const https = require('https');
 const http = require('http');
 
+const MAX_RETRIES = 3;
+const INITIAL_DELAY_MS = 1000;
+
 /**
- * Call AI API (OpenAI-compatible or Anthropic)
+ * Sanitize error messages to prevent API key/token leakage
  */
-async function callAI({ provider, apiKey, apiBaseUrl, model, messages, maxTokens = 4096 }) {
-  if (provider === 'anthropic') {
-    return callAnthropic({ apiKey, apiBaseUrl, model, messages, maxTokens });
+function sanitizeError(error) {
+  let msg = error.message || String(error);
+  // Redact anything that looks like an API key or token
+  msg = msg.replace(/Bearer\s+[A-Za-z0-9\-_.~+/]+=*/gi, 'Bearer [REDACTED]');
+  msg = msg.replace(/x-api-key:\s*[A-Za-z0-9\-_.~+/]+=*/gi, 'x-api-key: [REDACTED]');
+  msg = msg.replace(/[A-Za-z0-9]{20,}/g, (match) => {
+    // Only redact strings that look like tokens (long alphanumeric)
+    if (match.length > 30) return '[REDACTED]';
+    return match;
+  });
+  return msg;
+}
+
+/**
+ * Sleep utility for retry delays
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Determine if an error is retryable (429, 5xx, network errors)
+ */
+function isRetryableError(error, statusCode) {
+  if (statusCode && (statusCode === 429 || statusCode >= 500)) return true;
+  const msg = (error.message || '').toLowerCase();
+  if (msg.includes('timeout')) return true;
+  if (msg.includes('econnreset') || msg.includes('econnrefused')) return true;
+  if (msg.includes('socket hang up')) return true;
+  if (msg.includes('rate limit') || msg.includes('429')) return true;
+  return false;
+}
+
+/**
+ * Call AI API (OpenAI-compatible or Anthropic) with retry + fallback
+ */
+async function callAI({ provider, apiKey, apiBaseUrl, model, fallbackModel, messages, maxTokens = 4096 }) {
+  const models = [model];
+  if (fallbackModel) models.push(fallbackModel);
+
+  let lastError;
+  for (const currentModel of models) {
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        const fn = provider === 'anthropic' ? callAnthropic : callOpenAICompatible;
+        return await fn({ apiKey, apiBaseUrl, model: currentModel, messages, maxTokens });
+      } catch (error) {
+        lastError = error;
+        const statusCode = error.statusCode || (error.message && error.message.match(/\b(4\d{2}|5\d{2})\b/)?.[0]);
+        if (isRetryableError(error, statusCode) && attempt < MAX_RETRIES - 1) {
+          const delay = INITIAL_DELAY_MS * Math.pow(2, attempt) + Math.random() * 500;
+          console.warn(`API call attempt ${attempt + 1} failed (${error.message}), retrying in ${Math.round(delay)}ms...`);
+          await sleep(delay);
+        } else {
+          break; // Non-retryable error or last attempt
+        }
+      }
+    }
+    // Move to fallback model if available
+    if (currentModel !== models[models.length - 1]) {
+      console.warn(`Model ${currentModel} failed, trying fallback...`);
+    }
   }
-  return callOpenAICompatible({ apiKey, apiBaseUrl, model, messages, maxTokens });
+  throw new Error(`All API attempts failed: ${sanitizeError(lastError)}`);
 }
 
 function callOpenAICompatible({ apiKey, apiBaseUrl, model, messages, maxTokens }) {
@@ -41,7 +103,9 @@ function callOpenAICompatible({ apiKey, apiBaseUrl, model, messages, maxTokens }
         try {
           const json = JSON.parse(data);
           if (json.error) {
-            reject(new Error(`API Error: ${json.error.message || JSON.stringify(json.error)}`));
+            const err = new Error(`API Error: ${json.error.message || JSON.stringify(json.error)}`);
+            err.statusCode = res.statusCode;
+            reject(err);
             return;
           }
           const content = json.choices?.[0]?.message?.content || '';
@@ -99,7 +163,9 @@ function callAnthropic({ apiKey, apiBaseUrl, model, messages, maxTokens }) {
         try {
           const json = JSON.parse(data);
           if (json.error) {
-            reject(new Error(`API Error: ${json.error.message || JSON.stringify(json.error)}`));
+            const err = new Error(`API Error: ${json.error.message || JSON.stringify(json.error)}`);
+            err.statusCode = res.statusCode;
+            reject(err);
             return;
           }
           const content = json.content?.[0]?.text || '';
@@ -120,4 +186,4 @@ function callAnthropic({ apiKey, apiBaseUrl, model, messages, maxTokens }) {
   });
 }
 
-module.exports = { callAI };
+module.exports = { callAI, sanitizeError };

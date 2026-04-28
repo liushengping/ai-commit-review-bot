@@ -2,7 +2,7 @@ name: AI Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, ready_for_review]
 
 permissions:
   contents: read
@@ -22,5 +22,9 @@ jobs:
           api-key: ${{ secrets.AI_API_KEY }}
           api-base-url: 'https://api.xiaomimimo.com/v1'
           model: 'MiMo-V2.5-Pro'
+          fallback-model: 'deepseek-chat'
           provider: 'openai-compatible'
           review-language: 'zh'
+          auto-approve: 'true'
+          inline-comments: 'true'
+          block-threshold: 'critical'

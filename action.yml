@@ -25,6 +25,11 @@ inputs:
     required: false
     default: 'MiMo-V2.5-Pro'
 
+  fallback-model:
+    description: 'Fallback model if primary model fails (e.g. deepseek-chat)'
+    required: false
+    default: ''
+
   provider:
     description: 'AI provider type: openai-compatible or anthropic'
     required: false

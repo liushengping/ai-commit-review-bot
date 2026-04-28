@@ -1,12 +1,15 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
 const path = require('path');
-const { parseDiff, truncateDiff, formatDiffForReview } = require('./diff-parser');
+const { parseDiff, truncateDiff, formatDiffForReview, mapDiffLineToNewFile, estimateTokens } = require('./diff-parser');
 const { reviewDiff, formatReviewComment, meetsSeverityThreshold } = require('./reviewer');
 const { filterFiles } = require('./file-filter');
 const { loadConfig } = require('./config');
+const { sendNotifications } = require('./notifier');
+const { recordReview, formatStatsSummary } = require('./stats');
 
 async function run() {
+  const startTime = Date.now();
   try {
     // 1. Get inputs
     const githubToken = core.getInput('github-token', { required: true });
@@ -20,12 +23,19 @@ async function run() {
     const autoApprove = core.getInput('auto-approve') === 'true';
     const inlineComments = core.getInput('inline-comments') !== 'false';
     const blockThreshold = core.getInput('block-threshold') || 'critical';
+    const fallbackModel = core.getInput('fallback-model') || '';
 
     // 2. Get PR context
     const context = github.context;
     const pr = context.payload.pull_request;
     if (!pr) {
       core.warning('This action only works on pull_request events. Skipping.');
+      return;
+    }
+
+    // Skip draft PRs
+    if (pr.draft) {
+      core.info('📝 PR is a draft. Skipping review.');
       return;
     }
 
@@ -45,29 +55,58 @@ async function run() {
     const effectiveAutoApprove = autoApprove || config.review.auto_approve;
     const effectiveBlockThreshold = blockThreshold !== 'critical' ? blockThreshold : config.severity.block_threshold;
     const effectiveInlineThreshold = config.severity.inline_threshold;
+    const effectiveFallback = fallbackModel || config.model?.fallback || '';
 
-    // 4. Fetch diff
-    const { data: diffData } = await octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: pullNumber,
-      mediaType: { format: 'diff' },
-    });
+    // 4. Incremental review: find new commits since last bot review
+    let incrementalMode = false;
+    let lastReviewSha = null;
+    if (config.review.incremental !== false) {
+      const lastSha = await findLastReviewCommit(octokit, owner, repo, pullNumber);
+      if (lastSha) {
+        lastReviewSha = lastSha;
+        incrementalMode = true;
+        core.info(`🔄 Incremental mode: reviewing changes since ${lastSha.substring(0, 8)}`);
+      }
+    }
 
-    const rawDiff = typeof diffData === 'string' ? diffData : '';
+    // 5. Fetch diff
+    let rawDiff;
+    if (incrementalMode && lastReviewSha) {
+      // Get diff only for commits after the last review
+      const { data: comparisonData } = await octokit.rest.repos.compareCommits({
+        owner,
+        repo,
+        base: lastReviewSha,
+        head: pr.head.sha,
+        mediaType: { format: 'diff' },
+      });
+      rawDiff = typeof comparisonData === 'string' ? comparisonData : '';
+    } else {
+      const { data: diffData } = await octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: pullNumber,
+        mediaType: { format: 'diff' },
+      });
+      rawDiff = typeof diffData === 'string' ? diffData : '';
+    }
 
     if (!rawDiff || rawDiff.trim().length === 0) {
+      if (incrementalMode) {
+        core.info('No new changes since last review. Skipping.');
+        return;
+      }
       if (skipIfNoDiff) {
         core.info('No code changes detected. Skipping review.');
         return;
       }
     }
 
-    // 5. Parse diff
+    // 6. Parse diff (with line mapping)
     const files = parseDiff(rawDiff);
     core.info(`📂 Found ${files.length} changed file(s)`);
 
-    // 6. Smart filtering
+    // 7. Smart filtering
     const { reviewable, skipped } = filterFiles(files);
     core.info(`✅ ${reviewable.length} files to review, ${skipped.length} skipped`);
 
@@ -82,12 +121,15 @@ async function run() {
       return;
     }
 
-    // 7. Truncate and format diff
-    const truncatedFiles = truncateDiff(reviewable, maxDiffLines);
+    // 8. Global token-aware truncation
+    const { files: truncatedFiles, truncated, totalTokens } = truncateDiff(reviewable, maxDiffLines);
+    if (truncated) {
+      core.info(`⚠️ Diff truncated to ~${totalTokens} tokens to stay within budget`);
+    }
     const diffText = formatDiffForReview(truncatedFiles);
 
-    // 8. Run AI review
-    core.info(`🤖 Running AI review with ${model} via ${provider}...`);
+    // 9. Run AI review
+    core.info(`🤖 Running AI review with ${model}${effectiveFallback ? ` (fallback: ${effectiveFallback})` : ''} via ${provider}...`);
 
     const review = await reviewDiff({
       diffText,
@@ -96,15 +138,51 @@ async function run() {
       apiKey,
       apiBaseUrl,
       model,
+      fallbackModel: effectiveFallback,
       customPrompt: config.custom_prompt,
+      languageRules: config.language_rules,
     });
 
-    core.info(`✅ Review complete. Risk: ${review.risk_level}, Issues: ${review.issues.length}`);
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    core.info(`✅ Review complete. Risk: ${review.risk_level}, Issues: ${review.issues.length} (${duration}s)`);
 
-    // 9. Post summary comment to PR
+    // 10. Map AI-reported line numbers to actual new-file line numbers
+    // Build a mapping from filename → lineMapping for quick lookup
+    const fileLineMaps = new Map();
+    for (const file of truncatedFiles) {
+      if (file.lineMapping) {
+        fileLineMaps.set(file.filename, file.lineMapping);
+      }
+    }
+
+    for (const issue of review.issues) {
+      const mapping = fileLineMaps.get(issue.file);
+      if (mapping) {
+        const actualLine = mapDiffLineToNewFile(mapping, issue.line);
+        if (actualLine !== null) {
+          issue.line = actualLine;
+        }
+        // else: keep AI-reported line as fallback
+      }
+    }
+
+    // 11. Post summary comment to PR
+    const totalAdditions = truncatedFiles.reduce((s, f) => s + f.additions, 0);
+    const totalDeletions = truncatedFiles.reduce((s, f) => s + f.deletions, 0);
+
     const comment = formatReviewComment(review, effectiveLanguage, {
       skippedFiles: skipped,
       model,
+      incremental: incrementalMode,
+      truncated,
+      totalTokens,
+      stats: {
+        filesReviewed: reviewable.length,
+        filesSkipped: skipped.length,
+        additions: totalAdditions,
+        deletions: totalDeletions,
+        duration,
+      },
     });
 
     const BOT_MARKER = '🤖 Powered by [AI Commit Review Bot]';
@@ -137,24 +215,24 @@ async function run() {
       core.info('📌 Posted new review comment.');
     }
 
-    // 10. Post inline comments on specific lines
+    // 12. Post inline comments using correct line mapping
     if (inlineComments && review.issues.length > 0) {
-      await postInlineComments(octokit, owner, repo, pullNumber, review, diffData, effectiveInlineThreshold);
+      await postInlineComments(octokit, owner, repo, pullNumber, review, effectiveInlineThreshold);
     }
 
-    // 11. Set outputs
+    // 13. Set outputs
     core.setOutput('risk-level', review.risk_level);
     core.setOutput('issues-count', review.issues.length.toString());
     core.setOutput('summary', review.summary);
 
-    // 12. Block PR if severity threshold met
+    // 14. Block PR if severity threshold met
     const shouldBlock = review.issues.some(i => meetsSeverityThreshold(i.severity, effectiveBlockThreshold));
     if (shouldBlock) {
       const criticalCount = review.issues.filter(i => meetsSeverityThreshold(i.severity, effectiveBlockThreshold)).length;
       core.setFailed(`🚨 Found ${criticalCount} issue(s) at or above ${effectiveBlockThreshold} level. Please fix before merging.`);
     }
 
-    // 13. Auto-approve if no issues and enabled
+    // 15. Auto-approve if no issues and enabled
     if (effectiveAutoApprove && review.issues.length === 0) {
       try {
         await octokit.rest.pulls.createReview({
@@ -170,6 +248,46 @@ async function run() {
       }
     }
 
+    // 16. Auto-label PR
+    if (config.labels?.enabled) {
+      await labelPR(octokit, owner, repo, pullNumber, review, config.labels.prefix || 'ai-review');
+    }
+
+    // 17. Record statistics
+    if (config.stats?.enabled !== false) {
+      const workspace = process.env.GITHUB_WORKSPACE || '.';
+      recordReview(workspace, review, {
+        prNumber: pullNumber,
+        prTitle: pr.title,
+        filesReviewed: reviewable.length,
+        filesSkipped: skipped.length,
+        model,
+        duration,
+      });
+
+      // Write job summary if available
+      try {
+        const { loadStats } = require('./stats');
+        const stats = loadStats(workspace);
+        core.summary?.addRaw(formatStatsSummary(stats));
+        await core.summary?.write();
+      } catch (e) {
+        // Non-fatal
+      }
+    }
+
+    // 18. Send webhook notifications
+    if (config.webhooks && config.webhooks.length > 0) {
+      const prUrl = `https://github.com/${owner}/${repo}/pull/${pullNumber}`;
+      await sendNotifications({
+        review,
+        prUrl,
+        prTitle: pr.title,
+        webhooks: config.webhooks,
+      });
+      core.info('📢 Webhook notifications sent.');
+    }
+
   } catch (error) {
     core.setFailed(`Action failed: ${error.message}`);
     core.error(error.stack || '');
@@ -177,9 +295,56 @@ async function run() {
 }
 
 /**
- * Post inline review comments on specific code lines
+ * Find the SHA of the last commit that was reviewed by the bot
  */
-async function postInlineComments(octokit, owner, repo, pullNumber, review, diffData, threshold) {
+async function findLastReviewCommit(octokit, owner, repo, pullNumber) {
+  try {
+    const { data: comments } = await octokit.rest.issues.listComments({
+      owner,
+      repo,
+      issue_number: pullNumber,
+      per_page: 100,
+    });
+
+    const BOT_MARKER = '🤖 Powered by [AI Commit Review Bot]';
+    // Find the most recent bot comment
+    const botComments = comments
+      .filter(c => c.body && c.body.includes(BOT_MARKER))
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    if (botComments.length === 0) return null;
+
+    // Get the commits to find which one was the latest at the time of the review
+    const { data: commits } = await octokit.rest.pulls.listCommits({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+
+    const lastBotReviewTime = new Date(botComments[0].created_at);
+
+    // Find the latest commit that was before the bot's last review
+    let lastSha = null;
+    for (const commit of commits) {
+      const commitTime = new Date(commit.commit.committer.date);
+      if (commitTime <= lastBotReviewTime) {
+        lastSha = commit.sha;
+      }
+    }
+
+    return lastSha;
+  } catch (e) {
+    core.warning(`Could not determine incremental base: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Post inline review comments on specific code lines
+ * Uses pre-computed line mapping from diff-parser
+ */
+async function postInlineComments(octokit, owner, repo, pullNumber, review, threshold) {
   const issuesForInline = review.issues.filter(i =>
     i.line > 0 && meetsSeverityThreshold(i.severity, threshold)
   );
@@ -193,12 +358,9 @@ async function postInlineComments(octokit, owner, repo, pullNumber, review, diff
   const comments = [];
 
   for (const issue of issuesForInline) {
-    // Find the matching file in the diff to get the right side (new file) line number
-    const lineNum = issue.line;
-
     comments.push({
       path: issue.file,
-      line: lineNum,
+      line: issue.line,
       body: formatInlineComment(issue),
     });
   }
@@ -236,6 +398,52 @@ async function postInlineComments(octokit, owner, repo, pullNumber, review, diff
         core.warning(`Could not comment on ${comment.path}:${comment.line}: ${e2.message}`);
       }
     }
+  }
+}
+
+/**
+ * Auto-label PR based on review results
+ */
+async function labelPR(octokit, owner, repo, pullNumber, review, prefix) {
+  try {
+    const labels = [];
+
+    // Risk level label
+    labels.push(`${prefix}:${review.risk_level}`);
+
+    // Category labels
+    const categories = new Set(review.issues.map(i => i.category));
+    for (const cat of categories) {
+      labels.push(`${prefix}:${cat}`);
+    }
+
+    // Ensure labels exist, then apply
+    for (const label of labels) {
+      try {
+        await octokit.rest.issues.getLabel({ owner, repo, name: label });
+      } catch {
+        // Label doesn't exist, create it
+        const colors = {
+          low: '0e8a16', medium: 'fbca04', high: 'e11d48', critical: '7c0a02',
+          bug: 'd73a4a', security: 'e11d48', performance: 'fbca04', quality: '0075ca', missing: 'f9d0c4',
+        };
+        const cat = label.split(':')[1];
+        try {
+          await octokit.rest.issues.createLabel({
+            owner, repo, name: label, color: colors[cat] || 'ededed',
+          });
+        } catch {
+          // Ignore creation errors
+        }
+      }
+    }
+
+    await octokit.rest.issues.addLabels({
+      owner, repo, issue_number: pullNumber, labels,
+    });
+    core.info(`🏷️ Applied labels: ${labels.join(', ')}`);
+  } catch (e) {
+    core.warning(`Could not apply labels: ${e.message}`);
   }
 }
 

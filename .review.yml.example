@@ -8,6 +8,11 @@ review:
   skip_if_no_diff: true
   auto_approve: false       # Auto-approve PR if no issues found
   fail_on_critical: true    # Fail action if critical issues found
+  incremental: true         # Only review new changes since last review
+
+# AI model settings
+model:
+  fallback: 'deepseek-chat' # Fallback model if primary fails
 
 # File filtering
 filter:
@@ -24,6 +29,38 @@ severity:
   block_threshold: critical  # none | info | warning | error | critical
   inline_threshold: warning  # Minimum severity for inline comments
 
+# Language/framework specific review rules
+# Each rule targets files matching a glob pattern with custom review instructions
+language_rules:
+  - pattern: "*.py"
+    prompt: |
+      重点关注：
+      - 类型提示是否完整
+      - f-string 中的注入风险
+      - GIL 相关的并发问题
+      - 异常处理是否具体（避免 bare except）
+  - pattern: "*.go"
+    prompt: |
+      重点关注：
+      - goroutine 泄露
+      - error 是否被正确检查和传播
+      - defer 在循环中的使用
+      - context 取消传播
+  - pattern: "*.java"
+    prompt: |
+      重点关注：
+      - 资源是否正确关闭（try-with-resources）
+      - 空指针防护
+      - 线程安全
+      - Spring 注入的正确性
+  - pattern: "*.sql"
+    prompt: |
+      重点关注：
+      - SQL 注入风险
+      - 索引使用效率
+      - N+1 查询问题
+      - 事务隔离级别
+
 # Custom review prompt (appended to the default prompt)
 custom_prompt: |
   重点关注：
@@ -36,3 +73,36 @@ ignore:
   - "docs/"
   - "*.md"
   - "CHANGELOG"
+
+# Webhook notifications for review results
+# Supports: dingtalk, wecom (企业微信), slack, feishu (飞书), generic
+webhooks:
+  # DingTalk robot
+  # - type: dingtalk
+  #   url: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
+
+  # 企业微信 robot
+  # - type: wecom
+  #   url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY
+
+  # Slack incoming webhook
+  # - type: slack
+  #   url: https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+
+  # 飞书 robot
+  # - type: feishu
+  #   url: https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_HOOK
+
+  # Generic webhook (receives JSON with title, text, data fields)
+  # - type: generic
+  #   url: https://your-server.com/webhook
+  #   secret: optional-hmac-secret
+
+# PR auto-labeling based on review results
+labels:
+  enabled: false            # Set to true to enable auto-labeling
+  prefix: 'ai-review'      # Labels will be: ai-review:low, ai-review:bug, etc.
+
+# Statistics tracking
+stats:
+  enabled: true             # Track review statistics to review-stats.json

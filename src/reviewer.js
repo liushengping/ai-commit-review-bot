@@ -90,14 +90,35 @@ function getReviewPrompt(language) {
 }
 
 /**
- * Call AI to review the diff
+ * Build per-language/file-pattern rules section
  */
-async function reviewDiff({ diffText, language, provider, apiKey, apiBaseUrl, model, customPrompt }) {
+function buildLanguageRulesPrompt(languageRules) {
+  if (!languageRules || !Array.isArray(languageRules) || languageRules.length === 0) return '';
+
+  let section = '\n\n## Language/Framework Specific Rules\n\n';
+  for (const rule of languageRules) {
+    if (rule.pattern && rule.prompt) {
+      section += `### Files matching \`${rule.pattern}\`\n${rule.prompt}\n\n`;
+    }
+  }
+  return section;
+}
+
+/**
+ * Call AI to review the diff (with optional fallback model)
+ */
+async function reviewDiff({ diffText, language, provider, apiKey, apiBaseUrl, model, fallbackModel, customPrompt, languageRules }) {
   const systemPrompt = language === 'en'
     ? 'You are an expert code reviewer. Output only valid JSON. Every issue MUST have a line number.'
     : '你是一位资深代码审查专家。只输出合法的 JSON，不要包含 markdown 代码块标记。每个 issue 必须有行号。';
 
   let userPrompt = getReviewPrompt(language) + diffText;
+
+  // Add language-specific rules
+  const langRulesPrompt = buildLanguageRulesPrompt(languageRules);
+  if (langRulesPrompt) {
+    userPrompt += langRulesPrompt;
+  }
 
   if (customPrompt) {
     userPrompt += '\n\n## Additional Review Instructions\n\n' + customPrompt;
@@ -108,6 +129,7 @@ async function reviewDiff({ diffText, language, provider, apiKey, apiBaseUrl, mo
     apiKey,
     apiBaseUrl,
     model,
+    fallbackModel,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
@@ -190,9 +212,22 @@ function formatReviewComment(review, language, meta = {}) {
   // Header
   parts.push(`## ${riskEmoji[review.risk_level] || '🟡'} AI Code Review`);
   parts.push('');
+
+  // Incremental review badge
+  if (meta.incremental) {
+    parts.push('> 🆕 **Incremental review** — only reviewing changes since last review');
+    parts.push('');
+  }
+
   parts.push(`**${review.summary}**`);
   parts.push(`> Risk Level: **${review.risk_level.toUpperCase()}**`);
   parts.push('');
+
+  // Token usage info
+  if (meta.totalTokens) {
+    parts.push(`> 📊 Estimated tokens: ~${meta.totalTokens.toLocaleString()}${meta.truncated ? ' (truncated)' : ''}`);
+    parts.push('');
+  }
 
   // Issues summary
   if (review.issues.length > 0) {
@@ -240,6 +275,17 @@ function formatReviewComment(review, language, meta = {}) {
     for (const h of review.highlights) {
       parts.push(`- ${h}`);
     }
+    parts.push('');
+  }
+
+  // Review stats summary
+  if (meta.stats) {
+    parts.push('### 📈 Review Statistics');
+    parts.push('');
+    parts.push(`- Files reviewed: ${meta.stats.filesReviewed || 0}`);
+    parts.push(`- Files skipped: ${meta.stats.filesSkipped || 0}`);
+    parts.push(`- Total changes: +${meta.stats.additions || 0} -${meta.stats.deletions || 0}`);
+    if (meta.stats.duration) parts.push(`- Review duration: ${meta.stats.duration}s`);
     parts.push('');
   }
 
